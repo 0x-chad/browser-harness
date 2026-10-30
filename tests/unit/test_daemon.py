@@ -21,12 +21,45 @@ def _fresh_daemon():
     return d
 
 
-def test_set_session_enables_all_four_default_domains_on_new_session():
+def test_context_telemetry_preserves_console_and_errors_without_runtime_enable():
+    class _Context:
+        pages = []
+
+        async def expose_binding(self, name, callback):
+            self.name = name
+            self.callback = callback
+
+        async def add_init_script(self, script):
+            self.script = script
+
+    d = daemon.Daemon()
+    context = _Context()
+    asyncio.run(d._install_context_telemetry(context))
+
+    page = object()
+    context.callback(
+        {"page": page},
+        {"method": "Playwright.console", "params": {"type": "log", "text": "hello"}},
+    )
+    context.callback(
+        {"page": page},
+        {"method": "Playwright.pageError", "params": {"message": "boom"}},
+    )
+
+    assert [event["method"] for event in d.events] == [
+        "Playwright.console",
+        "Playwright.pageError",
+    ]
+    assert "new Proxy" in context.script
+    assert "unhandledrejection" in context.script
+    assert "Runtime.enable" not in context.script
+
+
+def test_set_session_enables_raw_domains_without_runtime_on_new_session():
     """Regression: switch_tab() / new_tab() in helpers.py route through the
     `set_session` IPC, which previously only enabled Page on the new
-    session. With Network disabled, wait_for_network_idle() silently stops
-    receiving events after a tab switch. Initial attach enables all four
-    (Page, DOM, Runtime, Network); set_session must enable the same set."""
+    session. Network must remain enabled for wait_for_network_idle(), while
+    Runtime must remain disabled because Rebrowser owns context discovery."""
     d = _fresh_daemon()
     new_session = "session-AFTER-switch"
 
@@ -40,9 +73,8 @@ def test_set_session_enables_all_four_default_domains_on_new_session():
         method for (method, _params, sid) in d.cdp.calls
         if sid == new_session and method.endswith(".enable")
     ]
-    assert set(enabled_on_new) == {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}, (
-        f"set_session must enable Page/DOM/Runtime/Network on the new session "
-        f"(parity with initial attach). Got: {enabled_on_new}"
+    assert set(enabled_on_new) == {"Page.enable", "DOM.enable", "Network.enable"}, (
+        f"set_session must enable Page/DOM/Network, but never Runtime. Got: {enabled_on_new}"
     )
     assert d.session == new_session
     assert d.target_id == "target-2"
@@ -84,7 +116,7 @@ def test_enable_default_domains_swallows_errors_per_domain():
     attempted = [m for (m, _p, _s) in d.cdp.calls]
     assert "Page.enable" in attempted
     assert "DOM.enable" in attempted  # attempted, but raised
-    assert "Runtime.enable" in attempted
+    assert "Runtime.enable" not in attempted
     assert "Network.enable" in attempted
 
 
@@ -140,7 +172,7 @@ def test_set_session_does_not_disable_network_when_no_previous_session():
 
 
 def test_set_session_runs_disable_and_enables_in_parallel():
-    """The four Domain.enable calls (plus Network.disable on the old session)
+    """The three Domain.enable calls (plus Network.disable on the old session)
     must run concurrently via asyncio.gather, not sequentially. With the old
     sequential code, helpers.switch_tab() would block in _send() for up to
     ~22s on a slow/remote daemon while the helper's IPC socket has a 5s
@@ -178,8 +210,8 @@ def test_set_session_runs_disable_and_enables_in_parallel():
         # in-flight. Cap iterations to avoid hanging if parallelization breaks.
         for _ in range(50):
             await asyncio.sleep(0)
-            # 5 = Network.disable on OLD + 4 enables on NEW.
-            if d.cdp.in_flight >= 5:
+            # 4 = Network.disable on OLD + 3 enables on NEW.
+            if d.cdp.in_flight >= 4:
                 break
         peak = d.cdp.max_concurrent
         d.cdp.release.set()
@@ -187,20 +219,21 @@ def test_set_session_runs_disable_and_enables_in_parallel():
         return peak, d.cdp.calls
 
     peak, calls = asyncio.run(run())
-    assert peak == 5, (
-        f"set_session must run disable + 4 enables concurrently via gather "
-        f"(observed peak in-flight = {peak}; expected 5 = 1 disable on OLD + "
-        f"4 enables on NEW). Sequential await would peak at 1."
+    assert peak == 4, (
+        f"set_session must run disable + 3 enables concurrently via gather "
+        f"(observed peak in-flight = {peak}; expected 4 = 1 disable on OLD + "
+        f"3 enables on NEW). Sequential await would peak at 1."
     )
     # Sanity: the right calls were made.
     methods = sorted({m for (m, _p, _s) in calls})
     assert "Network.disable" in methods
-    assert {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}.issubset(methods)
+    assert {"Page.enable", "DOM.enable", "Network.enable"}.issubset(methods)
+    assert "Runtime.enable" not in methods
 
 
-def test_set_session_first_attach_runs_four_enables_in_parallel():
+def test_set_session_first_attach_runs_three_enables_in_parallel():
     """When there's no previous session, the disable path is skipped — only
-    the four enables run, still in parallel."""
+    the three non-Runtime enables run, still in parallel."""
     class _ConcurrencyProbeCDP:
         def __init__(self):
             self.calls = []
@@ -231,7 +264,7 @@ def test_set_session_first_attach_runs_four_enables_in_parallel():
         }))
         for _ in range(50):
             await asyncio.sleep(0)
-            if d.cdp.in_flight >= 4:
+            if d.cdp.in_flight >= 3:
                 break
         peak = d.cdp.max_concurrent
         d.cdp.release.set()
@@ -239,8 +272,8 @@ def test_set_session_first_attach_runs_four_enables_in_parallel():
         return peak
 
     peak = asyncio.run(run())
-    assert peak == 4, (
-        f"first set_session must run 4 enables concurrently "
+    assert peak == 3, (
+        f"first set_session must run 3 enables concurrently "
         f"(observed peak = {peak}). No Network.disable should fire."
     )
 
