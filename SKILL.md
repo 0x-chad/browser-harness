@@ -189,6 +189,9 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
 - If the current tab is stale or internal, call `ensure_real_tab()`.
 - Use `js(...)` for DOM inspection or extraction when coordinates are the wrong tool.
 - When entering unusually long text, avoid slow per-character typing: find a faster page-appropriate input method, then verify the page kept the exact value.
+- Before submitting a form, verify every entered value and selection against the intended inputs.
+- Prefer waits tied to observable state such as an expected URL, text, element, or load state. Use fixed-duration waits only for animations or when no observable condition exists.
+- After a rerender, timeout, covered element, popup, or iframe change, re-inspect the current AX/DOM, tab, and frame state before acting again. Resolve visible blockers instead of forcing a click, and do not blindly retry stale targets.
 - Login walls: stop and ask. Exception: use available SSO automatically when Chrome is already signed in; still stop for passwords, MFA, consent, or ambiguous account choice.
 - Raw CDP is available with `cdp("Domain.method", ...)`.
   Pass CDP parameters as keywords: `cdp("Input.insertText", text="hello")`.
