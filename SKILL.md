@@ -234,6 +234,7 @@ recording path while the main agent returns the task result.
 ## Interaction Skills
 
 If you get stuck on a browser mechanic, check https://github.com/browser-use/browser-harness/tree/main/interaction-skills.
+For Browser Use cloud, pass `allowResizing=True` when creating a session that may need `Browser.setWindowBounds`; otherwise the provider may keep its original bounds while accepting the CDP call.
 
 - connection.md
 - cookies.md
