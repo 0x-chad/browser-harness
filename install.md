@@ -47,17 +47,18 @@ This makes new Codex or Claude Code sessions in other folders load the runtime b
 ## Architecture
 
 ```text
-Chrome / Browser Use cloud -> CDP WS -> browser_harness.daemon -> IPC -> browser_harness.run
+Chrome / Clearcote / Browser Use cloud -> CDP WS -> Rebrowser Playwright + raw CDP -> browser_harness.daemon -> IPC -> browser_harness.run
 ```
 
 - Protocol is one JSON line each way.
-- Requests are {method, params, session_id} for CDP or {meta: ...} for daemon control.
+- Normal helper actions use patched Rebrowser Playwright. Requests are {method, params, session_id} only for explicit raw CDP, or {meta: ...} for daemon/Playwright control.
 - Responses are {result} / {error} / {events} / {session_id}.
 - IPC: Unix socket at `/tmp/bu-<NAME>.sock` on POSIX, TCP loopback + port file on Windows.
 - BU_NAME namespaces the daemon's IPC, pid, and log files.
 - BU_CDP_WS overrides local Chrome discovery for remote browsers.
 - BU_CDP_URL overrides local Chrome discovery with a specific DevTools HTTP endpoint (used for Way 2).
 - BU_BROWSER_ID + BROWSER_USE_API_KEY lets the daemon stop a Browser Use cloud browser on shutdown.
+- BH_RUNTIME_DEBUG=1 explicitly enables native Runtime console/error events at the cost of reduced stealth. It must be present when the daemon starts; normal mode never enables Runtime or modifies `console.*` in the page.
 
 # Browser connection setup and troubleshooting
 

@@ -1,11 +1,11 @@
 ---
 name: browser
-description: Direct browser control via CDP. Use when the user wants to automate, scrape, test, or interact with web pages. Connects to the user's already-running Chrome.
+description: Stealth browser control through Rebrowser Playwright with raw CDP available when needed. Use when the user wants to automate, scrape, test, or interact with web pages.
 ---
 
 # browser-harness
 
-Direct browser control via CDP. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read install.md.
+Browser control through patched Rebrowser Playwright over an existing CDP connection. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read install.md.
 
 Domain skills (community-contributed per-site playbooks under `agent-workspace/domain-skills/`) are off by default. Set `BH_DOMAIN_SKILLS=1` to enable them; see the bottom section.
 
@@ -92,13 +92,30 @@ If you start struggling with a specific mechanic while navigating, look in inter
 - DOM reads: use js(...) for inspection and extraction when the screenshot shows that coordinates are the wrong tool.
 - Iframe sites (Azure blades, Salesforce): click_at_xy(x, y) passes through; only drop to iframe DOM work when coordinate clicks are the wrong tool.
 - Auth wall: redirected to login → stop and ask the user. Don't type credentials from screenshots.
-- Raw CDP for anything helpers don't cover: cdp("Domain.method", params).
+- Raw CDP remains available for anything helpers don't cover: cdp("Domain.method", params). Do not call `Runtime.enable`; normal evaluation uses patched Playwright specifically to avoid it.
+
+## Stealth and native debugging
+
+Normal mode deliberately does not stream console messages or uncaught page errors. Chromium requires `Runtime.enable` for native `Runtime.consoleAPICalled` and `Runtime.exceptionThrown` events, and enabling it restores a known CDP timing signal. Do not inject or wrap `console.*` to work around that boundary. Calls to `js(...)` still execute and return their own evaluation errors normally.
+
+When native console/error events are genuinely needed, restart that daemon in explicit debug mode:
+
+```bash
+BU_NAME="$BROWSER_POOL_SESSION" browser-harness --reload
+BH_RUNTIME_DEBUG=1 BU_NAME="$BROWSER_POOL_SESSION" browser-harness <<'PY'
+# Native CDP events are exposed directly in drain_events().
+print([e for e in drain_events() if e["method"] in
+       ("Runtime.consoleAPICalled", "Runtime.exceptionThrown")])
+PY
+```
+
+Debug mode reduces stealth for the entire daemon session and follows tab switches. Return to normal mode by reloading the daemon and starting it again without `BH_RUNTIME_DEBUG=1`.
 
 ## Design constraints
 
-- Coordinate clicks default. Input.dispatchMouseEvent goes through iframes/shadow/cross-origin at the compositor level.
+- Coordinate clicks default. Normal navigation, evaluation, input, screenshots, and uploads run through Rebrowser Playwright.
 - Connect to the user's running Chrome. Don't launch your own browser.
-- cdp-use is only for CDPClient.send_raw. Prefer raw CDP strings over typed wrappers.
+- Rebrowser Playwright owns execution contexts, frames, workers, and normal actions. cdp-use remains only for the raw `cdp()` escape hatch and Network event buffering.
 - run.py stays tiny. No argparse, subcommands, or extra control layer.
 - Core helpers stay short. Put task-specific helper additions in `agent-workspace/agent_helpers.py`; daemon/bootstrap and remote session admin live in the core package.
 - Don't add a manager layer. No retries framework, session manager, daemon supervisor, config system, or logging framework.
