@@ -58,6 +58,8 @@ start_remote_daemon prints liveUrl and auto-opens it in the local browser (if a 
 
 Profiles (cookies-only login state) live in interaction-skills/profile-sync.md — covers list_cloud_profiles(), the chat-driven "which profile?" pattern, and sync_local_profile() for uploading a local Chrome profile.
 
+Viewport and window resizing live in interaction-skills/viewport.md. For Browser Use cloud, pass allowResizing=True at session creation if you may need Browser.setWindowBounds later; sessions created with allowResizing=False can accept the CDP call but keep provider-clamped bounds.
+
 ## Interaction skills
 
 If you start struggling with a specific mechanic while navigating, look in interaction-skills/ for helpers. They cover reusable UI mechanics like dialogs, tabs, dropdowns, iframes, and uploads. The available interaction skills are:
