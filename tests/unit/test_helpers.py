@@ -54,7 +54,7 @@ def test_goto_url_includes_domain_skills_when_enabled(tmp_path, monkeypatch):
 
 
 def test_page_info_raises_clear_error_on_js_exception():
-    def fake_send(req):
+    def fake_send(req, **_kwargs):
         if req.get("meta") == "pending_dialog":
             return {"dialog": None}
         raise RuntimeError("ReferenceError: location is not defined")

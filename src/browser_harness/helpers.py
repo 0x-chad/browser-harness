@@ -39,8 +39,8 @@ SOCK = ipc.sock_addr(NAME)
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 
 
-def _send(req):
-    c, token = ipc.connect(NAME, timeout=5.0)
+def _send(req, timeout=5.0):
+    c, token = ipc.connect(NAME, timeout=timeout)
     try:
         r = ipc.request(c, token, req)
     finally:
@@ -56,7 +56,7 @@ def cdp(method, session_id=None, **params):
 
 def _playwright(action, **params):
     """Patched Playwright path used by normal helpers; cdp() remains raw."""
-    return _send({"meta": "playwright", "action": action, "params": params}).get("result")
+    return _send({"meta": "playwright", "action": action, "params": params}, timeout=30.0).get("result")
 
 
 def drain_events():  return _send({"meta": "drain_events"})["events"]
