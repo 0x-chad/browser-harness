@@ -3,7 +3,7 @@
 Core helpers live here. Agent-editable helpers live in
 BH_AGENT_WORKSPACE/agent_helpers.py.
 """
-import base64, importlib.util, json, math, os, sys, time, urllib.request
+import base64, importlib.util, json, os, sys, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -54,67 +54,17 @@ def cdp(method, session_id=None, **params):
     return _send({"method": method, "params": params, "session_id": session_id}).get("result", {})
 
 
+def _playwright(action, **params):
+    """Patched Playwright path used by normal helpers; cdp() remains raw."""
+    return _send({"meta": "playwright", "action": action, "params": params}).get("result")
+
+
 def drain_events():  return _send({"meta": "drain_events"})["events"]
 
 
 def _js_snippet(expression, limit=160):
     snippet = expression.strip().replace("\n", "\\n")
     return snippet[:limit - 3] + "..." if len(snippet) > limit else snippet
-
-
-def _js_exception_description(result, details):
-    desc = result.get("description")
-    exc = details.get("exception") if details else None
-    if not desc and isinstance(exc, dict):
-        desc = exc.get("description")
-        if desc is None and "value" in exc:
-            desc = str(exc["value"])
-        if desc is None:
-            desc = exc.get("className")
-    if not desc and details:
-        desc = details.get("text")
-    return desc or "JavaScript evaluation failed"
-
-
-def _decode_unserializable_js_value(value):
-    if value == "NaN":
-        return math.nan
-    if value == "Infinity":
-        return math.inf
-    if value == "-Infinity":
-        return -math.inf
-    if value == "-0":
-        return -0.0
-    if value.endswith("n"):
-        return int(value[:-1])
-    return value
-
-
-def _runtime_value(response, expression):
-    result = response.get("result", {})
-    details = response.get("exceptionDetails")
-    if details or result.get("subtype") == "error":
-        desc = _js_exception_description(result, details)
-        if details:
-            line = details.get("lineNumber")
-            col = details.get("columnNumber")
-            loc = f" at line {line}, column {col}" if line is not None and col is not None else ""
-        else:
-            loc = ""
-        raise RuntimeError(f"JavaScript evaluation failed{loc}: {desc}; expression: {_js_snippet(expression)}")
-    if "value" in result:
-        return result["value"]
-    if "unserializableValue" in result:
-        return _decode_unserializable_js_value(result["unserializableValue"])
-    return None
-
-
-def _runtime_evaluate(expression, session_id=None, await_promise=False):
-    try:
-        r = cdp("Runtime.evaluate", session_id=session_id, expression=expression, returnByValue=True, awaitPromise=await_promise)
-    except TimeoutError as e:
-        raise RuntimeError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
-    return _runtime_value(r, expression)
 
 
 def _has_return_statement(expression):
@@ -157,7 +107,7 @@ def _has_return_statement(expression):
 
 # --- navigation / page ---
 def goto_url(url):
-    r = cdp("Page.navigate", url=url)
+    r = _playwright("goto", url=url)
     if os.environ.get("BH_DOMAIN_SKILLS") != "1":
         return r
     d = (AGENT_WORKSPACE / "domain-skills" / (urlparse(url).hostname or "").removeprefix("www.").split(".")[0])
@@ -173,7 +123,7 @@ def page_info():
     if dialog:
         return {"dialog": dialog}
     expression = "JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
-    return json.loads(_runtime_evaluate(expression))
+    return json.loads(js(expression))
 
 # --- input ---
 _debug_click_counter = 0
@@ -197,11 +147,10 @@ def click_at_xy(x, y, button="left", clicks=1):
         except Exception as e:
             print(f"[debug_click] overlay failed: {e}")
         _debug_click_counter += 1
-    cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, clickCount=clicks)
-    cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, clickCount=clicks)
+    _playwright("mouse_click", x=x, y=y, button=button, clicks=clicks)
 
 def type_text(text):
-    cdp("Input.insertText", text=text)
+    _playwright("insert_text", text=text)
 
 def fill_input(selector, text, clear_first=True, timeout=0.0):
     """Fill a framework-managed input (React controlled, Vue v-model, Ember tracked).
@@ -223,15 +172,8 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
     if not focused:
         raise RuntimeError(f"fill_input: element not found: {selector!r}")
     if clear_first:
-        # Dispatch select-all directly — NOT via press_key, which always emits a
-        # `char` event for single-char keys. With Ctrl/Cmd held, that `char`
-        # makes Chrome treat the input as a printable "a" instead of firing the
-        # select-all shortcut, leaving the field uncleared.
         mods = 4 if sys.platform == "darwin" else 2  # Cmd on macOS, Ctrl elsewhere
-        select_all = {"key": "a", "code": "KeyA", "modifiers": mods,
-                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65}
-        cdp("Input.dispatchKeyEvent", type="rawKeyDown", **select_all)
-        cdp("Input.dispatchKeyEvent", type="keyUp", **select_all)
+        press_key("a", modifiers=mods)
         press_key("Backspace")
     for ch in text:
         press_key(ch)
@@ -242,27 +184,12 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
         f"e.dispatchEvent(new Event('change',{{bubbles:true}}));}})();"
     )
 
-_KEYS = {  # key → (windowsVirtualKeyCode, code, text)
-    "Enter": (13, "Enter", "\r"), "Tab": (9, "Tab", "\t"), "Backspace": (8, "Backspace", ""),
-    "Escape": (27, "Escape", ""), "Delete": (46, "Delete", ""), " ": (32, "Space", " "),
-    "ArrowLeft": (37, "ArrowLeft", ""), "ArrowUp": (38, "ArrowUp", ""),
-    "ArrowRight": (39, "ArrowRight", ""), "ArrowDown": (40, "ArrowDown", ""),
-    "Home": (36, "Home", ""), "End": (35, "End", ""),
-    "PageUp": (33, "PageUp", ""), "PageDown": (34, "PageDown", ""),
-}
 def press_key(key, modifiers=0):
-    """Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift.
-    Special keys (Enter, Tab, Arrow*, Backspace, etc.) carry their virtual key codes
-    so listeners checking e.keyCode / e.key all fire."""
-    vk, code, text = _KEYS.get(key, (ord(key[0]) if len(key) == 1 else 0, key, key if len(key) == 1 else ""))
-    base = {"key": key, "code": code, "modifiers": modifiers, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk}
-    cdp("Input.dispatchKeyEvent", type="keyDown", **base, **({"text": text} if text else {}))
-    if text and len(text) == 1:
-        cdp("Input.dispatchKeyEvent", type="char", text=text, **{k: v for k, v in base.items() if k != "text"})
-    cdp("Input.dispatchKeyEvent", type="keyUp", **base)
+    """Press a Playwright key. Modifiers: 1=Alt, 2=Ctrl, 4=Meta, 8=Shift."""
+    _playwright("press_key", key=key, modifiers=modifiers)
 
 def scroll(x, y, dy=-300, dx=0):
-    cdp("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=dx, deltaY=dy)
+    _playwright("scroll", x=x, y=y, dx=dx, dy=dy)
 
 
 # --- visual ---
@@ -270,8 +197,8 @@ def capture_screenshot(path=None, full=False, max_dim=None):
     """Save a PNG of the current viewport. Set max_dim=1800 on a 2× display to
     keep the file under the 2000px-per-side limit some image-aware LLMs enforce."""
     path = path or str(ipc._TMP / "shot.png")
-    r = cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
-    open(path, "wb").write(base64.b64decode(r["data"]))
+    data = _playwright("screenshot", full=full)
+    open(path, "wb").write(base64.b64decode(data))
     if max_dim:
         from PIL import Image
         img = Image.open(path)
@@ -297,7 +224,7 @@ def current_tab():
 
 def _mark_tab():
     """Prepend 🐴 to tab title so the user can see which tab the agent controls."""
-    try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
+    try: _playwright("evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
     except Exception: pass
 
 def switch_tab(target):
@@ -306,7 +233,7 @@ def switch_tab(target):
     target_id = target.get("targetId") if isinstance(target, dict) else target
     # Unmark old tab. 🐴 is a surrogate pair in JS UTF-16 strings (2 code units),
     # plus the trailing space = 3 code units, so slice(3) cleanly removes the prefix.
-    try: cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
+    try: _playwright("evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
     except Exception: pass
     cdp("Target.activateTarget", targetId=target_id)
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
@@ -429,10 +356,12 @@ def js(expression, target_id=None):
     Expressions with top-level `return` are automatically wrapped in an IIFE, so both
     `document.title` and `const x = 1; return x` are valid inputs.
     """
-    sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
     if _has_return_statement(expression) and not expression.strip().startswith("("):
         expression = f"(function(){{{expression}}})()"
-    return _runtime_evaluate(expression, session_id=sid, await_promise=True)
+    try:
+        return _playwright("evaluate", expression=expression, target_id=target_id)
+    except TimeoutError as e:
+        raise RuntimeError(f"Playwright evaluation timed out; expression: {_js_snippet(expression)}") from e
 
 
 _KC = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, " ": 32, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40}
@@ -450,11 +379,8 @@ def dispatch_key(selector, key="Enter", event="keypress"):
     )
 
 def upload_file(selector, path):
-    """Set files on a file input via CDP DOM.setFileInputFiles. `path` is an absolute filepath (use tempfile.mkstemp if needed)."""
-    doc = cdp("DOM.getDocument", depth=-1)
-    nid = cdp("DOM.querySelector", nodeId=doc["root"]["nodeId"], selector=selector)["nodeId"]
-    if not nid: raise RuntimeError(f"no element for {selector}")
-    cdp("DOM.setFileInputFiles", files=[path] if isinstance(path, str) else list(path), nodeId=nid)
+    """Set files on a file input through patched Playwright."""
+    _playwright("upload", selector=selector, files=[path] if isinstance(path, str) else list(path))
 
 def http_get(url, headers=None, timeout=20.0):
     """Pure HTTP — no browser. Use for static pages / APIs. Wrap in ThreadPoolExecutor for bulk.

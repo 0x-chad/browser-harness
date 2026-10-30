@@ -1,11 +1,11 @@
 ---
 name: browser
-description: Direct browser control via CDP. Use when the user wants to automate, scrape, test, or interact with web pages. Connects to the user's already-running Chrome.
+description: Stealth browser control through Rebrowser Playwright with raw CDP available when needed. Use when the user wants to automate, scrape, test, or interact with web pages.
 ---
 
 # browser-harness
 
-Direct browser control via CDP. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read install.md.
+Browser control through patched Rebrowser Playwright over an existing CDP connection. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read install.md.
 
 Domain skills (community-contributed per-site playbooks under `agent-workspace/domain-skills/`) are off by default. Set `BH_DOMAIN_SKILLS=1` to enable them; see the bottom section.
 
@@ -58,6 +58,8 @@ start_remote_daemon prints liveUrl and auto-opens it in the local browser (if a 
 
 Profiles (cookies-only login state) live in interaction-skills/profile-sync.md — covers list_cloud_profiles(), the chat-driven "which profile?" pattern, and sync_local_profile() for uploading a local Chrome profile.
 
+Viewport and window resizing live in interaction-skills/viewport.md. For Browser Use cloud, pass allowResizing=True at session creation if you may need Browser.setWindowBounds later; sessions created with allowResizing=False can accept the CDP call but keep provider-clamped bounds.
+
 ## Interaction skills
 
 If you start struggling with a specific mechanic while navigating, look in interaction-skills/ for helpers. They cover reusable UI mechanics like dialogs, tabs, dropdowns, iframes, and uploads. The available interaction skills are:
@@ -90,13 +92,13 @@ If you start struggling with a specific mechanic while navigating, look in inter
 - DOM reads: use js(...) for inspection and extraction when the screenshot shows that coordinates are the wrong tool.
 - Iframe sites (Azure blades, Salesforce): click_at_xy(x, y) passes through; only drop to iframe DOM work when coordinate clicks are the wrong tool.
 - Auth wall: redirected to login → stop and ask the user. Don't type credentials from screenshots.
-- Raw CDP for anything helpers don't cover: cdp("Domain.method", params).
+- Raw CDP remains available for anything helpers don't cover: cdp("Domain.method", params). Do not call `Runtime.enable`; normal evaluation uses patched Playwright specifically to avoid it.
 
 ## Design constraints
 
-- Coordinate clicks default. Input.dispatchMouseEvent goes through iframes/shadow/cross-origin at the compositor level.
+- Coordinate clicks default. Normal navigation, evaluation, input, screenshots, and uploads run through Rebrowser Playwright.
 - Connect to the user's running Chrome. Don't launch your own browser.
-- cdp-use is only for CDPClient.send_raw. Prefer raw CDP strings over typed wrappers.
+- Rebrowser Playwright owns execution contexts, frames, workers, and normal actions. cdp-use remains only for the raw `cdp()` escape hatch and Network event buffering.
 - run.py stays tiny. No argparse, subcommands, or extra control layer.
 - Core helpers stay short. Put task-specific helper additions in `agent-workspace/agent_helpers.py`; daemon/bootstrap and remote session admin live in the core package.
 - Don't add a manager layer. No retries framework, session manager, daemon supervisor, config system, or logging framework.

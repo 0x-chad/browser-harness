@@ -1,11 +1,17 @@
 """CDP WS holder + IPC relay (Unix socket on POSIX, TCP loopback on Windows). One daemon per BU_NAME."""
-import asyncio, json, os, socket, sys, time, urllib.error, urllib.request
+import asyncio, base64, json, os, secrets, socket, sys, time, urllib.error, urllib.request
 from urllib.parse import urlparse
 from collections import deque
 from pathlib import Path
 
 from . import _ipc as ipc
 from cdp_use.client import CDPClient
+from rebrowser_playwright.async_api import async_playwright
+
+
+# Rebrowser's default context-discovery mode avoids Runtime.enable while still
+# preserving main-world, iframe, worker, console, and page-error support.
+os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
 
 
 def _load_env():
@@ -182,6 +188,12 @@ def is_real_page(t):
 class Daemon:
     def __init__(self):
         self.cdp = None
+        self.playwright = None
+        self.browser = None
+        self.page = None
+        self.page_targets = {}
+        self.bound_pages = set()
+        self.telemetry_binding = f"__bh_{secrets.token_hex(8)}"
         self.session = None
         self.target_id = None
         self.events = deque(maxlen=BUF)
@@ -206,7 +218,7 @@ class Daemon:
         return pages[0]
 
     async def _enable_default_domains(self, session_id):
-        """Enable Page/DOM/Runtime/Network on a CDP session.
+        """Enable only the raw CDP domains needed by legacy helpers.
 
         Used by both initial attach and set_session (called after switch_tab/
         new_tab). Without this, helpers that depend on Network.* events —
@@ -227,12 +239,186 @@ class Daemon:
                 )
             except Exception as e:
                 log(f"enable {d} on {session_id}: {e}")
-        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))
+        # Never enable Runtime here. Rebrowser Playwright owns execution-context
+        # discovery and evaluation specifically to avoid Runtime.enable's
+        # detectable side effects.
+        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Network")))
+
+    def _emit_playwright_event(self, method, params, page=None):
+        target_id = next((tid for tid, candidate in self.page_targets.items() if candidate is page), None)
+        self.events.append({
+            "method": method,
+            "params": params,
+            "session_id": self.session if page is self.page else None,
+            "target_id": target_id,
+        })
+
+    def _bind_page_events(self, page):
+        if page in self.bound_pages:
+            return
+        self.bound_pages.add(page)
+        page.on("console", lambda msg: self._emit_playwright_event(
+            "Playwright.console",
+            {"type": msg.type, "text": msg.text, "location": msg.location},
+            page,
+        ))
+        page.on("pageerror", lambda error: self._emit_playwright_event(
+            "Playwright.pageError",
+            {"message": str(error), "name": getattr(error, "name", "Error"), "stack": getattr(error, "stack", None)},
+            page,
+        ))
+        page.on("worker", lambda worker: self._emit_playwright_event(
+            "Playwright.worker", {"url": worker.url}, page
+        ))
+        page.on("frameattached", lambda frame: self._emit_playwright_event(
+            "Playwright.frameAttached", {"url": frame.url, "name": frame.name}, page
+        ))
+        page.on("framenavigated", lambda frame: self._emit_playwright_event(
+            "Playwright.frameNavigated", {"url": frame.url, "name": frame.name}, page
+        ))
+        page.on("framedetached", lambda frame: self._emit_playwright_event(
+            "Playwright.frameDetached", {"url": frame.url, "name": frame.name}, page
+        ))
+
+    async def _install_context_telemetry(self, context):
+        """Preserve console/page-error events without Runtime.enable.
+
+        Chromium only emits Runtime.consoleAPICalled/exceptionThrown after
+        Runtime.enable, so Rebrowser cannot surface those native events in its
+        stealth mode. A short init script forwards the same information through
+        Runtime.addBinding, which is the patched transport Rebrowser already
+        uses for execution-context discovery.
+        """
+        def receive(source, payload):
+            page = source.get("page") if isinstance(source, dict) else None
+            method = payload.get("method") if isinstance(payload, dict) else None
+            params = payload.get("params", {}) if isinstance(payload, dict) else {}
+            if method in ("Playwright.console", "Playwright.pageError"):
+                self._emit_playwright_event(method, params, page)
+
+        await context.expose_binding(self.telemetry_binding, receive)
+        binding = json.dumps(self.telemetry_binding)
+        script = f"""(() => {{
+          const emit = globalThis[{binding}];
+          try {{ delete globalThis[{binding}]; }} catch (_) {{}}
+          if (!emit) return;
+          const text = value => {{
+            try {{ return typeof value === 'string' ? value : JSON.stringify(value); }}
+            catch (_) {{ return String(value); }}
+          }};
+          for (const type of ['log','debug','info','warn','error','assert']) {{
+            const original = console[type];
+            if (typeof original !== 'function') continue;
+            console[type] = new Proxy(original, {{
+              apply(target, thisArg, args) {{
+                try {{ void emit({{method:'Playwright.console',params:{{type,text:args.map(text).join(' '),location:{{url:location.href}}}}}}); }} catch (_) {{}}
+                return Reflect.apply(target, thisArg, args);
+              }}
+            }});
+          }}
+          addEventListener('error', event => {{
+            try {{ void emit({{method:'Playwright.pageError',params:{{message:event.message || text(event.error),name:event.error?.name || 'Error',stack:event.error?.stack || null}}}}); }} catch (_) {{}}
+          }}, true);
+          addEventListener('unhandledrejection', event => {{
+            const reason = event.reason;
+            try {{ void emit({{method:'Playwright.pageError',params:{{message:reason?.message || text(reason),name:reason?.name || 'UnhandledRejection',stack:reason?.stack || null}}}}); }} catch (_) {{}}
+          }});
+        }})()"""
+        await context.add_init_script(script)
+        for page in context.pages:
+            try:
+                # Rebrowser installs exposed bindings on future documents. Add
+                # the JS-side binding wrapper to an already-open document too.
+                await page.evaluate(
+                    f"globalThis.__playwright__binding__controller__?.addBinding({binding}, false)"
+                )
+                await page.evaluate(script)
+            except Exception:
+                pass
+
+    async def _target_id_for_page(self, page):
+        session = await page.context.new_cdp_session(page)
+        try:
+            info = await session.send("Target.getTargetInfo")
+            return info["targetInfo"]["targetId"]
+        finally:
+            await session.detach()
+
+    async def _register_page(self, page):
+        self._bind_page_events(page)
+        try:
+            self.page_targets[await self._target_id_for_page(page)] = page
+        except Exception as e:
+            log(f"map Playwright page target: {e}")
+
+    async def _refresh_pages(self):
+        if not self.browser:
+            return
+        live_pages = {page for context in self.browser.contexts for page in context.pages}
+        self.page_targets = {tid: page for tid, page in self.page_targets.items() if page in live_pages}
+        await asyncio.gather(*(self._register_page(page) for page in live_pages))
+
+    async def _select_page(self, target_id):
+        if not self.browser:
+            return None
+        await self._refresh_pages()
+        self.page = self.page_targets.get(target_id)
+        if self.page:
+            await self.page.bring_to_front()
+        return self.page
+
+    async def _frame_for_target(self, target_id):
+        if not target_id:
+            return self.page
+        info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": target_id}))["targetInfo"]
+        url = info.get("url", "")
+        if self.page:
+            for frame in self.page.frames:
+                if frame.url == url:
+                    return frame
+        raise RuntimeError(f"Playwright frame not found for target {target_id}")
+
+    async def _playwright_action(self, action, params):
+        if not self.page:
+            await self._select_page(self.target_id)
+        if not self.page:
+            raise RuntimeError("Playwright is not attached to the active page")
+        if action == "evaluate":
+            frame = await self._frame_for_target(params.get("target_id"))
+            return await frame.evaluate(params["expression"])
+        if action == "goto":
+            response = await self.page.goto(params["url"], wait_until="commit")
+            return {"url": self.page.url, "status": response.status if response else None}
+        if action == "mouse_click":
+            await self.page.mouse.click(params["x"], params["y"], button=params.get("button", "left"), click_count=params.get("clicks", 1))
+            return None
+        if action == "insert_text":
+            await self.page.keyboard.insert_text(params["text"])
+            return None
+        if action == "press_key":
+            modifiers = params.get("modifiers", 0)
+            names = [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")]
+            chord = "+".join([name for bit, name in names if modifiers & bit] + [params["key"]])
+            await self.page.keyboard.press(chord)
+            return None
+        if action == "scroll":
+            await self.page.mouse.move(params["x"], params["y"])
+            await self.page.mouse.wheel(params.get("dx", 0), params.get("dy", -300))
+            return None
+        if action == "screenshot":
+            data = await self.page.screenshot(full_page=params.get("full", False))
+            return base64.b64encode(data).decode()
+        if action == "upload":
+            await self.page.locator(params["selector"]).set_input_files(params["files"])
+            return None
+        raise RuntimeError(f"unknown Playwright action: {action}")
 
     async def start(self):
         self.stop = asyncio.Event()
         url = get_ws_url()
-        log(f"connecting to {url}")
+        parsed_url = urlparse(url)
+        safe_url = parsed_url._replace(query="<redacted>").geturl() if parsed_url.query else url
+        log(f"connecting to {safe_url}")
         self.cdp = CDPClient(url)
         try:
             await self.cdp.start()
@@ -245,8 +431,13 @@ class Daemon:
                 )
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.connect_over_cdp(url)
+        for context in self.browser.contexts:
+            await self._install_context_telemetry(context)
+            context.on("page", lambda page: asyncio.create_task(self._register_page(page)))
+        await self._select_page(self.target_id)
         orig = self.cdp._event_registry.handle_event
-        mark_js = "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
         async def tap(method, params, session_id=None):
             self.events.append({"method": method, "params": params, "session_id": session_id})
             if method == "Page.javascriptDialogOpening":
@@ -254,9 +445,18 @@ class Daemon:
             elif method == "Page.javascriptDialogClosed":
                 self.dialog = None
             elif method in ("Page.loadEventFired", "Page.domContentEventFired"):
-                asyncio.create_task(_silent(asyncio.wait_for(self.cdp.send_raw("Runtime.evaluate", {"expression": mark_js}, session_id=self.session), timeout=2)))
+                asyncio.create_task(_silent(asyncio.wait_for(self._playwright_action("evaluate", {
+                    "expression": "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
+                }), timeout=2)))
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
+
+    async def close(self):
+        # Stop the Playwright driver/transport without closing the externally
+        # owned browser. browser-pool remains responsible for browser lifetime.
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
 
     async def handle(self, req):
         # Token guard for Windows TCP loopback: any local process can otherwise
@@ -275,6 +475,11 @@ class Daemon:
             out = list(self.events); self.events.clear()
             return {"events": out}
         if meta == "session":     return {"session_id": self.session}
+        if meta == "playwright":
+            try:
+                return {"result": await self._playwright_action(req["action"], req.get("params") or {})}
+            except Exception as e:
+                return {"error": str(e)}
         if meta == "current_tab":
             # Resolve the attached page's target info server-side. Helpers can't
             # send Target.getTargetInfo themselves: daemon strips session_id for
@@ -306,6 +511,7 @@ class Daemon:
             old_session = self.session
             self.session = req.get("session_id")
             self.target_id = req.get("target_id") or self.target_id
+            await self._select_page(self.target_id)
             # Run the old-session Network.disable (defense in depth — keeps
             # background-tab traffic out of the global event buffer; the
             # consumer-side filter in wait_for_network_idle is the actual
@@ -328,14 +534,9 @@ class Daemon:
             await asyncio.gather(*tasks)
             # 🐴 tab-marker title prefix is purely cosmetic — fire-and-forget so
             # it doesn't add to the synchronous IPC budget.
-            asyncio.create_task(_silent(asyncio.wait_for(
-                self.cdp.send_raw(
-                    "Runtime.evaluate",
-                    {"expression": "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"},
-                    session_id=self.session,
-                ),
-                timeout=2,
-            )))
+            asyncio.create_task(_silent(asyncio.wait_for(self._playwright_action("evaluate", {
+                "expression": "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
+            }), timeout=2)))
             return {"session_id": self.session}
         if meta == "pending_dialog": return {"dialog": self.dialog}
         if meta == "shutdown":    self.stop.set(); return {"ok": True}
@@ -391,8 +592,11 @@ async def serve(d):
 
 async def main():
     d = Daemon()
-    await d.start()
-    await serve(d)
+    try:
+        await d.start()
+        await serve(d)
+    finally:
+        await d.close()
 
 
 def already_running():

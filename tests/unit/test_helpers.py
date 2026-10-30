@@ -10,8 +10,8 @@ from browser_harness import helpers
 
 
 def _run(fake_png, width, height, **kwargs):
-    fake = lambda method, **_: {"data": fake_png(width, height)}
-    with patch("browser_harness.helpers.cdp", side_effect=fake), tempfile.TemporaryDirectory() as d:
+    fake = lambda action, **_: fake_png(width, height)
+    with patch("browser_harness.helpers._playwright", side_effect=fake), tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "shot.png")
         helpers.capture_screenshot(path, **kwargs)
         return Image.open(path).size
@@ -39,40 +39,27 @@ def test_goto_url_omits_domain_skills_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("BH_DOMAIN_SKILLS", raising=False)
     monkeypatch.setattr(helpers, "AGENT_WORKSPACE", tmp_path)
     _seed_skill(tmp_path)
-    with patch("browser_harness.helpers.cdp", return_value={"frameId": "f"}):
+    with patch("browser_harness.helpers._playwright", return_value={"url": "https://www.example.com/", "status": 200}):
         result = helpers.goto_url("https://www.example.com/")
-    assert result == {"frameId": "f"}
+    assert result == {"url": "https://www.example.com/", "status": 200}
 
 
 def test_goto_url_includes_domain_skills_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("BH_DOMAIN_SKILLS", "1")
     monkeypatch.setattr(helpers, "AGENT_WORKSPACE", tmp_path)
     _seed_skill(tmp_path)
-    with patch("browser_harness.helpers.cdp", return_value={"frameId": "f"}):
+    with patch("browser_harness.helpers._playwright", return_value={"url": "https://www.example.com/", "status": 200}):
         result = helpers.goto_url("https://www.example.com/")
-    assert result == {"frameId": "f", "domain_skills": ["scraping.md"]}
+    assert result == {"url": "https://www.example.com/", "status": 200, "domain_skills": ["scraping.md"]}
 
 
 def test_page_info_raises_clear_error_on_js_exception():
     def fake_send(req):
-        return {}
+        if req.get("meta") == "pending_dialog":
+            return {"dialog": None}
+        raise RuntimeError("ReferenceError: location is not defined")
 
-    def fake_cdp(method, **kwargs):
-        return {
-            "result": {
-                "type": "object",
-                "subtype": "error",
-                "description": "ReferenceError: location is not defined",
-            },
-            "exceptionDetails": {
-                "text": "Uncaught",
-                "lineNumber": 0,
-                "columnNumber": 16,
-            },
-        }
-
-    with patch("browser_harness.helpers._send", side_effect=fake_send), \
-         patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+    with patch("browser_harness.helpers._send", side_effect=fake_send):
         with pytest.raises(RuntimeError, match="ReferenceError"):
             helpers.page_info()
 
@@ -80,24 +67,22 @@ def test_page_info_raises_clear_error_on_js_exception():
 # --- fill_input ---
 
 def test_fill_input_focuses_types_and_fires_events():
-    cdp_calls = []
+    playwright_calls = []
     js_calls = []
 
-    def fake_cdp(method, **kwargs):
-        cdp_calls.append((method, kwargs))
-        return {}
+    def fake_playwright(action, **kwargs):
+        playwright_calls.append((action, kwargs))
 
     def fake_js(expr, **kwargs):
         js_calls.append(expr)
         return True  # focus call must return True (element found)
 
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
+    with patch("browser_harness.helpers._playwright", side_effect=fake_playwright), \
          patch("browser_harness.helpers.js", side_effect=fake_js):
         helpers.fill_input("#my-input", "hello")
 
     assert any("#my-input" in e for e in js_calls)
-    key_downs = [m for m, _ in cdp_calls if m == "Input.dispatchKeyEvent"]
-    assert len(key_downs) > 0
+    assert any(action == "press_key" for action, _ in playwright_calls)
     assert any("input" in e and "change" in e for e in js_calls)
 
 
@@ -115,15 +100,14 @@ def test_fill_input_clear_first_sends_select_all_then_backspace():
 
     key_events = []
 
-    def fake_cdp(method, **kwargs):
-        if method == "Input.dispatchKeyEvent":
+    def fake_playwright(action, **kwargs):
+        if action == "press_key":
             key_events.append(kwargs)
-        return {}
 
     def fake_js(expr, **kwargs):
         return True  # element found
 
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
+    with patch("browser_harness.helpers._playwright", side_effect=fake_playwright), \
          patch("browser_harness.helpers.js", side_effect=fake_js):
         helpers.fill_input("#inp", "x", clear_first=True)
 
@@ -136,32 +120,24 @@ def test_fill_input_clear_first_sends_select_all_then_backspace():
     assert all(e.get("modifiers") == expected_mod for e in a_events), \
         f"select-all 'a' must carry modifiers={expected_mod}; got {[e.get('modifiers') for e in a_events]}"
 
-    # Crucial: no `char` event for the "a" — emitting one makes Chrome treat
-    # Cmd/Ctrl+A as a printable letter instead of a shortcut.
-    assert not any(e.get("type") == "char" and e.get("text") == "a" for e in key_events), \
-        "select-all must not emit a 'char' event with text='a' (would cancel the shortcut)"
-
-    # Backspace still fires (via press_key, which uses keyDown).
-    keys_down = [e.get("key") for e in key_events if e.get("type") in ("keyDown", "rawKeyDown")]
-    assert "Backspace" in keys_down
+    assert "Backspace" in [e.get("key") for e in key_events]
 
 
 def test_fill_input_no_clear_skips_ctrl_a():
     key_events = []
 
-    def fake_cdp(method, **kwargs):
-        if method == "Input.dispatchKeyEvent":
+    def fake_playwright(action, **kwargs):
+        if action == "press_key":
             key_events.append(kwargs)
-        return {}
 
     def fake_js(expr, **kwargs):
         return True  # element found
 
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), \
+    with patch("browser_harness.helpers._playwright", side_effect=fake_playwright), \
          patch("browser_harness.helpers.js", side_effect=fake_js):
         helpers.fill_input("#inp", "x", clear_first=False)
 
-    keys_seen = [e.get("key") for e in key_events if e.get("type") == "keyDown"]
+    keys_seen = [e.get("key") for e in key_events]
     assert "Backspace" not in keys_seen
 
 
