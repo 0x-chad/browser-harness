@@ -21,40 +21,6 @@ def _fresh_daemon():
     return d
 
 
-def test_context_telemetry_preserves_console_and_errors_without_runtime_enable():
-    class _Context:
-        pages = []
-
-        async def expose_binding(self, name, callback):
-            self.name = name
-            self.callback = callback
-
-        async def add_init_script(self, script):
-            self.script = script
-
-    d = daemon.Daemon()
-    context = _Context()
-    asyncio.run(d._install_context_telemetry(context))
-
-    page = object()
-    context.callback(
-        {"page": page},
-        {"method": "Playwright.console", "params": {"type": "log", "text": "hello"}},
-    )
-    context.callback(
-        {"page": page},
-        {"method": "Playwright.pageError", "params": {"message": "boom"}},
-    )
-
-    assert [event["method"] for event in d.events] == [
-        "Playwright.console",
-        "Playwright.pageError",
-    ]
-    assert "new Proxy" in context.script
-    assert "unhandledrejection" in context.script
-    assert "Runtime.enable" not in context.script
-
-
 def test_set_session_enables_raw_domains_without_runtime_on_new_session():
     """Regression: switch_tab() / new_tab() in helpers.py route through the
     `set_session` IPC, which previously only enabled Page on the new
@@ -78,6 +44,74 @@ def test_set_session_enables_raw_domains_without_runtime_on_new_session():
     )
     assert d.session == new_session
     assert d.target_id == "target-2"
+
+
+def test_runtime_debug_mode_does_not_enable_runtime_on_legacy_session(monkeypatch):
+    monkeypatch.setenv("BH_RUNTIME_DEBUG", "1")
+    d = _fresh_daemon()
+
+    asyncio.run(d._enable_default_domains("session-debug"))
+
+    enabled = {
+        method for method, _params, sid in d.cdp.calls
+        if sid == "session-debug" and method.endswith(".enable")
+    }
+    assert enabled == {"Page.enable", "DOM.enable", "Network.enable"}
+
+
+def test_runtime_debug_mode_buffers_native_console_and_exception_events(monkeypatch):
+    monkeypatch.setenv("BH_RUNTIME_DEBUG", "1")
+
+    class _MapSession:
+        async def send(self, method, params=None):
+            assert method == "Target.getTargetInfo"
+            return {"targetInfo": {"targetId": "page-1"}}
+
+        async def detach(self):
+            pass
+
+    class _RuntimeSession:
+        def __init__(self):
+            self.handlers = {}
+            self.sent = []
+
+        def on(self, method, callback):
+            self.handlers[method] = callback
+
+        async def send(self, method, params=None):
+            self.sent.append((method, params))
+            return {}
+
+    runtime = _RuntimeSession()
+
+    class _Context:
+        def __init__(self):
+            self.calls = 0
+
+        async def new_cdp_session(self, page):
+            self.calls += 1
+            return _MapSession() if self.calls == 1 else runtime
+
+    class _Page:
+        def __init__(self):
+            self.context = _Context()
+            self.handlers = {}
+
+        def on(self, method, callback):
+            self.handlers[method] = callback
+
+    page = _Page()
+    d = daemon.Daemon()
+    asyncio.run(d._register_page(page))
+
+    runtime.handlers["Runtime.consoleAPICalled"]({"type": "log"})
+    runtime.handlers["Runtime.exceptionThrown"]({"exceptionDetails": {"text": "boom"}})
+
+    assert runtime.sent == [("Runtime.enable", None)]
+    assert [event["method"] for event in d.events] == [
+        "Runtime.consoleAPICalled",
+        "Runtime.exceptionThrown",
+    ]
 
 
 def test_set_session_falls_back_to_existing_target_id_when_not_provided():

@@ -1,5 +1,5 @@
 """CDP WS holder + IPC relay (Unix socket on POSIX, TCP loopback on Windows). One daemon per BU_NAME."""
-import asyncio, base64, json, os, secrets, socket, sys, time, urllib.error, urllib.request
+import asyncio, base64, json, os, socket, sys, time, urllib.error, urllib.request
 from urllib.parse import urlparse
 from collections import deque
 from pathlib import Path
@@ -10,7 +10,7 @@ from rebrowser_playwright.async_api import async_playwright
 
 
 # Rebrowser's default context-discovery mode avoids Runtime.enable while still
-# preserving main-world, iframe, worker, console, and page-error support.
+# preserving main-world, iframe, and worker support.
 os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
 
 
@@ -193,7 +193,7 @@ class Daemon:
         self.page = None
         self.page_targets = {}
         self.bound_pages = set()
-        self.telemetry_binding = f"__bh_{secrets.token_hex(8)}"
+        self.runtime_debug_sessions = {}
         self.session = None
         self.target_id = None
         self.events = deque(maxlen=BUF)
@@ -239,9 +239,9 @@ class Daemon:
                 )
             except Exception as e:
                 log(f"enable {d} on {session_id}: {e}")
-        # Never enable Runtime here. Rebrowser Playwright owns execution-context
-        # discovery and evaluation specifically to avoid Runtime.enable's
-        # detectable side effects.
+        # Runtime is intentionally absent in normal mode. Native console and
+        # exception streaming is available only through the explicit debug
+        # tradeoff because Runtime.enable has detectable timing side effects.
         await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Network")))
 
     def _emit_playwright_event(self, method, params, page=None):
@@ -257,16 +257,6 @@ class Daemon:
         if page in self.bound_pages:
             return
         self.bound_pages.add(page)
-        page.on("console", lambda msg: self._emit_playwright_event(
-            "Playwright.console",
-            {"type": msg.type, "text": msg.text, "location": msg.location},
-            page,
-        ))
-        page.on("pageerror", lambda error: self._emit_playwright_event(
-            "Playwright.pageError",
-            {"message": str(error), "name": getattr(error, "name", "Error"), "stack": getattr(error, "stack", None)},
-            page,
-        ))
         page.on("worker", lambda worker: self._emit_playwright_event(
             "Playwright.worker", {"url": worker.url}, page
         ))
@@ -280,62 +270,6 @@ class Daemon:
             "Playwright.frameDetached", {"url": frame.url, "name": frame.name}, page
         ))
 
-    async def _install_context_telemetry(self, context):
-        """Preserve console/page-error events without Runtime.enable.
-
-        Chromium only emits Runtime.consoleAPICalled/exceptionThrown after
-        Runtime.enable, so Rebrowser cannot surface those native events in its
-        stealth mode. A short init script forwards the same information through
-        Runtime.addBinding, which is the patched transport Rebrowser already
-        uses for execution-context discovery.
-        """
-        def receive(source, payload):
-            page = source.get("page") if isinstance(source, dict) else None
-            method = payload.get("method") if isinstance(payload, dict) else None
-            params = payload.get("params", {}) if isinstance(payload, dict) else {}
-            if method in ("Playwright.console", "Playwright.pageError"):
-                self._emit_playwright_event(method, params, page)
-
-        await context.expose_binding(self.telemetry_binding, receive)
-        binding = json.dumps(self.telemetry_binding)
-        script = f"""(() => {{
-          const emit = globalThis[{binding}];
-          try {{ delete globalThis[{binding}]; }} catch (_) {{}}
-          if (!emit) return;
-          const text = value => {{
-            try {{ return typeof value === 'string' ? value : JSON.stringify(value); }}
-            catch (_) {{ return String(value); }}
-          }};
-          for (const type of ['log','debug','info','warn','error','assert']) {{
-            const original = console[type];
-            if (typeof original !== 'function') continue;
-            console[type] = new Proxy(original, {{
-              apply(target, thisArg, args) {{
-                try {{ void emit({{method:'Playwright.console',params:{{type,text:args.map(text).join(' '),location:{{url:location.href}}}}}}); }} catch (_) {{}}
-                return Reflect.apply(target, thisArg, args);
-              }}
-            }});
-          }}
-          addEventListener('error', event => {{
-            try {{ void emit({{method:'Playwright.pageError',params:{{message:event.message || text(event.error),name:event.error?.name || 'Error',stack:event.error?.stack || null}}}}); }} catch (_) {{}}
-          }}, true);
-          addEventListener('unhandledrejection', event => {{
-            const reason = event.reason;
-            try {{ void emit({{method:'Playwright.pageError',params:{{message:reason?.message || text(reason),name:reason?.name || 'UnhandledRejection',stack:reason?.stack || null}}}}); }} catch (_) {{}}
-          }});
-        }})()"""
-        await context.add_init_script(script)
-        for page in context.pages:
-            try:
-                # Rebrowser installs exposed bindings on future documents. Add
-                # the JS-side binding wrapper to an already-open document too.
-                await page.evaluate(
-                    f"globalThis.__playwright__binding__controller__?.addBinding({binding}, false)"
-                )
-                await page.evaluate(script)
-            except Exception:
-                pass
-
     async def _target_id_for_page(self, page):
         session = await page.context.new_cdp_session(page)
         try:
@@ -348,6 +282,17 @@ class Daemon:
         self._bind_page_events(page)
         try:
             self.page_targets[await self._target_id_for_page(page)] = page
+            if os.environ.get("BH_RUNTIME_DEBUG") == "1" and page not in self.runtime_debug_sessions:
+                session = await page.context.new_cdp_session(page)
+                session.on("Runtime.consoleAPICalled", lambda params: self._emit_playwright_event(
+                    "Runtime.consoleAPICalled", params, page
+                ))
+                session.on("Runtime.exceptionThrown", lambda params: self._emit_playwright_event(
+                    "Runtime.exceptionThrown", params, page
+                ))
+                await session.send("Runtime.enable")
+                self.runtime_debug_sessions[page] = session
+                log(f"Runtime debug enabled for {next((tid for tid, candidate in self.page_targets.items() if candidate is page), 'page')}")
         except Exception as e:
             log(f"map Playwright page target: {e}")
 
@@ -434,7 +379,6 @@ class Daemon:
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.connect_over_cdp(url)
         for context in self.browser.contexts:
-            await self._install_context_telemetry(context)
             context.on("page", lambda page: asyncio.create_task(self._register_page(page)))
         await self._select_page(self.target_id)
         orig = self.cdp._event_registry.handle_event
@@ -454,6 +398,9 @@ class Daemon:
     async def close(self):
         # Stop the Playwright driver/transport without closing the externally
         # owned browser. browser-pool remains responsible for browser lifetime.
+        for session in self.runtime_debug_sessions.values():
+            await _silent(session.detach())
+        self.runtime_debug_sessions.clear()
         if self.playwright:
             await self.playwright.stop()
             self.playwright = None

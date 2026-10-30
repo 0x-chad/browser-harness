@@ -94,6 +94,23 @@ If you start struggling with a specific mechanic while navigating, look in inter
 - Auth wall: redirected to login → stop and ask the user. Don't type credentials from screenshots.
 - Raw CDP remains available for anything helpers don't cover: cdp("Domain.method", params). Do not call `Runtime.enable`; normal evaluation uses patched Playwright specifically to avoid it.
 
+## Stealth and native debugging
+
+Normal mode deliberately does not stream console messages or uncaught page errors. Chromium requires `Runtime.enable` for native `Runtime.consoleAPICalled` and `Runtime.exceptionThrown` events, and enabling it restores a known CDP timing signal. Do not inject or wrap `console.*` to work around that boundary. Calls to `js(...)` still execute and return their own evaluation errors normally.
+
+When native console/error events are genuinely needed, restart that daemon in explicit debug mode:
+
+```bash
+BU_NAME="$BROWSER_POOL_SESSION" browser-harness --reload
+BH_RUNTIME_DEBUG=1 BU_NAME="$BROWSER_POOL_SESSION" browser-harness <<'PY'
+# Native CDP events are exposed directly in drain_events().
+print([e for e in drain_events() if e["method"] in
+       ("Runtime.consoleAPICalled", "Runtime.exceptionThrown")])
+PY
+```
+
+Debug mode reduces stealth for the entire daemon session and follows tab switches. Return to normal mode by reloading the daemon and starting it again without `BH_RUNTIME_DEBUG=1`.
+
 ## Design constraints
 
 - Coordinate clicks default. Normal navigation, evaluation, input, screenshots, and uploads run through Rebrowser Playwright.

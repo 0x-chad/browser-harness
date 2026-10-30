@@ -58,6 +58,7 @@ Chrome / Clearcote / Browser Use cloud -> CDP WS -> Rebrowser Playwright + raw C
 - BU_CDP_WS overrides local Chrome discovery for remote browsers.
 - BU_CDP_URL overrides local Chrome discovery with a specific DevTools HTTP endpoint (used for Way 2).
 - BU_BROWSER_ID + BROWSER_USE_API_KEY lets the daemon stop a Browser Use cloud browser on shutdown.
+- BH_RUNTIME_DEBUG=1 explicitly enables native Runtime console/error events at the cost of reduced stealth. It must be present when the daemon starts; normal mode never enables Runtime or modifies `console.*` in the page.
 
 # Browser connection setup and troubleshooting
 
