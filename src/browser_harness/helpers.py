@@ -3,7 +3,7 @@
 Core helpers live here. Agent-editable helpers live in
 BH_AGENT_WORKSPACE/agent_helpers.py.
 """
-import base64, importlib.util, json, math, os, time, urllib.request
+import base64, importlib.util, json, os, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -77,67 +77,15 @@ def cdp(method, session_id=None, _response_timeout=DEFAULT_IPC_RESPONSE_TIMEOUT_
     ).get("result", {})
 
 
+def _playwright(action, _response_timeout=30.0, **params):
+    """Patched Playwright path for execution-context-aware operations."""
+    return _send(
+        {"meta": "playwright", "action": action, "params": params},
+        response_timeout=_response_timeout,
+    ).get("result")
+
+
 def drain_events():  return _send({"meta": "drain_events"})["events"]
-
-
-def _js_snippet(expression, limit=160):
-    snippet = expression.strip().replace("\n", "\\n")
-    return snippet[:limit - 3] + "..." if len(snippet) > limit else snippet
-
-
-def _js_exception_description(result, details):
-    desc = result.get("description")
-    exc = details.get("exception") if details else None
-    if not desc and isinstance(exc, dict):
-        desc = exc.get("description")
-        if desc is None and "value" in exc:
-            desc = str(exc["value"])
-        if desc is None:
-            desc = exc.get("className")
-    if not desc and details:
-        desc = details.get("text")
-    return desc or "JavaScript evaluation failed"
-
-
-def _decode_unserializable_js_value(value):
-    if value == "NaN":
-        return math.nan
-    if value == "Infinity":
-        return math.inf
-    if value == "-Infinity":
-        return -math.inf
-    if value == "-0":
-        return -0.0
-    if value.endswith("n"):
-        return int(value[:-1])
-    return value
-
-
-def _runtime_value(response, expression):
-    result = response.get("result", {})
-    details = response.get("exceptionDetails")
-    if details or result.get("subtype") == "error":
-        desc = _js_exception_description(result, details)
-        if details:
-            line = details.get("lineNumber")
-            col = details.get("columnNumber")
-            loc = f" at line {line}, column {col}" if line is not None and col is not None else ""
-        else:
-            loc = ""
-        raise RuntimeError(f"JavaScript evaluation failed{loc}: {desc}; expression: {_js_snippet(expression)}")
-    if "value" in result:
-        return result["value"]
-    if "unserializableValue" in result:
-        return _decode_unserializable_js_value(result["unserializableValue"])
-    return None
-
-
-def _runtime_evaluate(expression, session_id=None, await_promise=False):
-    try:
-        r = cdp("Runtime.evaluate", session_id=session_id, expression=expression, returnByValue=True, awaitPromise=await_promise)
-    except TimeoutError as e:
-        raise RuntimeError(f"Runtime.evaluate timed out; expression: {_js_snippet(expression)}") from e
-    return _runtime_value(r, expression)
 
 
 def _wrap_js_function(expression):
@@ -166,7 +114,7 @@ def page_info():
     if dialog:
         return {"dialog": dialog}
     expression = "JSON.stringify({url:location.href,title:document.title,w:innerWidth,h:innerHeight,sx:scrollX,sy:scrollY,pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
-    return json.loads(_runtime_evaluate(expression))
+    return json.loads(js(expression))
 
 # --- input ---
 _debug_click_counter = 0
@@ -566,41 +514,11 @@ def js(expression, target_id=None):
     `document.title` and `const x = 1; return x` work without mis-wrapping nested
     functions that contain their own returns.
     """
-    sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"] if target_id else None
     try:
-        result = _js_evaluate(expression, sid)
-    except BaseException:
-        # Keep the evaluation error; a detach failure here must not replace it.
-        if sid:
-            try:
-                _detach_iframe_session(sid)
-            except BaseException:
-                pass
-        raise
-    if sid:
-        _detach_iframe_session(sid)
-    return result
-
-
-def _js_evaluate(expression, sid):
-    try:
-        return _runtime_evaluate(expression, session_id=sid, await_promise=True)
+        return _playwright("evaluate", expression=expression, target_id=target_id)
     except RuntimeError as e:
         if _is_illegal_return_error(e):
-            return _runtime_evaluate(_wrap_js_function(expression), session_id=sid, await_promise=True)
-        raise
-
-
-def _detach_iframe_session(sid):
-    """Release the session js(target_id=...) attached so polling loops do not
-    accumulate one live session (and one event stream) per call. A session that
-    Chrome already dropped (iframe navigated or closed) is not a leak."""
-    try:
-        cdp("Target.detachFromTarget", sessionId=sid)
-    except Exception as e:
-        message = str(e).lower()
-        if "no session with given id" in message or "session with given id not found" in message:
-            return
+            return _playwright("evaluate", expression=_wrap_js_function(expression), target_id=target_id)
         raise
 
 

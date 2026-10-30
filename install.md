@@ -7,6 +7,10 @@ description: Install browser-harness and connect it to a browser fast.
 
 Use once. For browser work, read `SKILL.md`.
 
+The daemon keeps direct CDP control for browser actions and uses Rebrowser
+Playwright only for execution-context-aware JavaScript evaluation. Raw `cdp()`
+remains available; normal mode does not call `Runtime.enable`.
+
 ## Fast Path
 
 ```bash

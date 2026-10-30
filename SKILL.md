@@ -1,11 +1,11 @@
 ---
 name: browser-harness
-description: "Control a real browser via CDP: clicking, typing, navigation, logged-in sessions, JS-rendered or bot-protected pages. Not for plain HTTP fetches of public content - use curl for those."
+description: "Control a real browser through CDP with Rebrowser-patched JavaScript evaluation: clicking, typing, navigation, logged-in sessions, JS-rendered or bot-protected pages. Not for plain HTTP fetches of public content - use curl for those."
 ---
 
 # browser-harness
 
-Direct browser control via CDP. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read https://github.com/browser-use/browser-harness/blob/main/install.md.
+Direct browser control via CDP, with Rebrowser Playwright owning execution-context discovery and `js(...)` evaluation so normal mode never enables the Runtime domain. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read https://github.com/browser-use/browser-harness/blob/main/install.md.
 
 ## When Not to Use
 
@@ -194,6 +194,13 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
   Pass CDP parameters as keywords: `cdp("Input.insertText", text="hello")`.
   The second positional argument is a session ID, not a parameters dictionary.
   When targeting an explicit session, use `session_id="..."` alongside the keywords.
+- Do not call `Runtime.enable` in normal mode. `js(...)` uses Rebrowser's
+  execution-context path; raw input, navigation, screenshots and the `cdp()`
+  escape hatch retain Browser Harness's direct-CDP behavior.
+- For an explicitly lower-stealth debugging session, start a fresh daemon with
+  `BH_RUNTIME_DEBUG=1`; native `Runtime.consoleAPICalled` and
+  `Runtime.exceptionThrown` entries then appear in `drain_events()`. Restart
+  without that variable to return to normal mode.
 
 ## Recordings and Videos
 
@@ -250,6 +257,8 @@ If you get stuck on a browser mechanic, check https://github.com/browser-use/bro
 ## Design Constraints
 
 - Coordinate clicks default. CDP mouse events pass through iframes/shadow/cross-origin at the compositor level.
+- Rebrowser Playwright owns JavaScript execution contexts, frames and workers;
+  direct CDP remains the action and escape-hatch transport.
 - Keep the connection model simple: use the default daemon, `BU_NAME`, `BU_CDP_URL`, `BU_CDP_WS`, or `start_remote_daemon(...)`.
 - Trusted orchestrators can set `BH_OPEN_LIVE_URL=0` while provisioning a Cloud
   daemon to keep its interactive live-view URL from being printed or opened.

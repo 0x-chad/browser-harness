@@ -31,5 +31,5 @@ def test_packaged_skill_frontmatter_is_valid_simple_yaml():
 
     assert metadata == {
         "name": "browser-harness",
-        "description": "Control a real browser via CDP: clicking, typing, navigation, logged-in sessions, JS-rendered or bot-protected pages. Not for plain HTTP fetches of public content - use curl for those.",
+        "description": "Control a real browser through CDP with Rebrowser-patched JavaScript evaluation: clicking, typing, navigation, logged-in sessions, JS-rendered or bot-protected pages. Not for plain HTTP fetches of public content - use curl for those.",
     }

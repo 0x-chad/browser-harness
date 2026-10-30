@@ -98,25 +98,12 @@ def test_goto_url_includes_domain_skills_when_enabled(tmp_path, monkeypatch):
 
 
 def test_page_info_raises_clear_error_on_js_exception():
-    def fake_send(req):
-        return {}
+    def fake_send(req, **_kwargs):
+        if req.get("meta") == "pending_dialog":
+            return {"dialog": None}
+        raise RuntimeError("ReferenceError: location is not defined")
 
-    def fake_cdp(method, **kwargs):
-        return {
-            "result": {
-                "type": "object",
-                "subtype": "error",
-                "description": "ReferenceError: location is not defined",
-            },
-            "exceptionDetails": {
-                "text": "Uncaught",
-                "lineNumber": 0,
-                "columnNumber": 16,
-            },
-        }
-
-    with patch("browser_harness.helpers._send", side_effect=fake_send), \
-         patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+    with patch("browser_harness.helpers._send", side_effect=fake_send):
         with pytest.raises(RuntimeError, match="ReferenceError"):
             helpers.page_info()
 
@@ -624,117 +611,19 @@ def test_fill_input_types_each_character_as_a_real_key():
     assert typed == [("H", "KeyH", 72, True), ("i", "KeyI", 73, False), ("!", "Digit1", 49, True)]
 
 
-def _js_session_calls(expression, target_id, evaluate=None, detach=None):
+def test_js_routes_iframe_target_through_playwright():
     calls = []
 
-    def fake_cdp(method, **kwargs):
-        calls.append((method, kwargs))
-        if method == "Target.attachToTarget":
-            return {"sessionId": f"sess-{len(calls)}"}
-        if method == "Runtime.evaluate":
-            if evaluate:
-                return evaluate(kwargs)
-            return {"result": {"type": "number", "value": 1}}
-        if method == "Target.detachFromTarget" and detach:
-            return detach(kwargs)
-        return {}
+    def fake(action, **params):
+        calls.append((action, params))
+        return 7
 
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
-        try:
-            helpers.js(expression, target_id=target_id)
-        except RuntimeError:
-            pass
-    return calls
-
-
-def test_js_with_target_detaches_the_session_it_attached():
-    calls = _js_session_calls("1", "iframe-target")
-    attached = [k["targetId"] for m, k in calls if m == "Target.attachToTarget"]
-    detached = [k["sessionId"] for m, k in calls if m == "Target.detachFromTarget"]
-    assert attached == ["iframe-target"]
-    assert detached == ["sess-1"], f"js(target_id=...) must release its session; calls: {calls}"
-    assert [m for m, _ in calls][-1] == "Target.detachFromTarget"
-
-
-def test_js_without_target_never_attaches_or_detaches():
-    calls = _js_session_calls("1", None)
-    assert [m for m, _ in calls] == ["Runtime.evaluate"]
-
-
-def test_js_with_target_detaches_even_when_evaluation_fails():
-    def boom(_kwargs):
-        raise RuntimeError("evaluation failed")
-
-    calls = _js_session_calls("1", "iframe-target", evaluate=boom)
-    assert [m for m, _ in calls] == ["Target.attachToTarget", "Runtime.evaluate", "Target.detachFromTarget"]
-
-
-def test_js_with_target_reuses_one_session_across_the_return_retry():
-    seen = []
-
-    def evaluate(kwargs):
-        seen.append(kwargs["session_id"])
-        if len(seen) == 1:
-            raise RuntimeError("SyntaxError: Illegal return statement")
-        return {"result": {"type": "number", "value": 1}}
-
-    calls = _js_session_calls("return 1", "iframe-target", evaluate=evaluate)
-    assert seen == ["sess-1", "sess-1"]
-    assert [m for m, _ in calls].count("Target.detachFromTarget") == 1
-
-
-def test_js_ignores_detach_of_a_session_chrome_already_dropped():
-    def gone(_kwargs):
-        raise RuntimeError("CDP error: No session with given id")
-
-    calls = []
-
-    def fake_cdp(method, **kwargs):
-        calls.append(method)
-        if method == "Target.attachToTarget":
-            return {"sessionId": "sess-1"}
-        if method == "Runtime.evaluate":
-            return {"result": {"type": "number", "value": 7}}
-        return gone(kwargs)
-
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp):
+    with patch("browser_harness.helpers._playwright", side_effect=fake):
         assert helpers.js("7", target_id="iframe-target") == 7
-    assert calls[-1] == "Target.detachFromTarget"
+    assert calls == [("evaluate", {"expression": "7", "target_id": "iframe-target"})]
 
 
-def test_js_surfaces_an_unexpected_detach_failure_after_success():
-    def fake_cdp(method, **kwargs):
-        if method == "Target.attachToTarget":
-            return {"sessionId": "sess-1"}
-        if method == "Runtime.evaluate":
-            return {"result": {"type": "number", "value": 7}}
-        raise RuntimeError("session broker unreachable")
-
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="session broker unreachable"):
-        helpers.js("7", target_id="iframe-target")
-
-
-def test_js_keeps_the_evaluation_error_when_detach_also_fails():
-    def fake_cdp(method, **kwargs):
-        if method == "Target.attachToTarget":
-            return {"sessionId": "sess-1"}
-        if method == "Runtime.evaluate":
-            raise RuntimeError("evaluation failed")
-        raise RuntimeError("daemon unreachable")
-
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(RuntimeError, match="evaluation failed"):
-        helpers.js("7", target_id="iframe-target")
-
-
-def test_js_keeps_base_exception_from_evaluation_when_detach_also_raises():
-    def fake_cdp(method, **kwargs):
-        if method == "Target.attachToTarget":
-            return {"sessionId": "sess-1"}
-        if method == "Runtime.evaluate":
-            raise KeyboardInterrupt("evaluation interrupted")
-        raise KeyboardInterrupt("detach interrupted")
-
-    with patch("browser_harness.helpers.cdp", side_effect=fake_cdp), pytest.raises(
-        KeyboardInterrupt, match="evaluation interrupted"
-    ):
-        helpers.js("7", target_id="iframe-target")
+def test_js_without_target_routes_main_frame_through_playwright():
+    with patch("browser_harness.helpers._playwright", return_value=1) as evaluate:
+        assert helpers.js("1") == 1
+    evaluate.assert_called_once_with("evaluate", expression="1", target_id=None)

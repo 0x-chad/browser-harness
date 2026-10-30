@@ -8,6 +8,12 @@ from . import _ipc as ipc
 from . import auth
 from . import paths
 from cdp_use.client import CDPClient
+from rebrowser_playwright.async_api import async_playwright
+
+
+# Rebrowser discovers execution contexts without Runtime.enable. Clearcote
+# handles the browser fingerprint; Rebrowser owns page/frame evaluation.
+os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
 
 
 def _load_env():
@@ -424,6 +430,12 @@ class _PatientCDPClient(CDPClient):
 class Daemon:
     def __init__(self):
         self.cdp = None
+        self.playwright = None
+        self.browser = None
+        self.page = None
+        self.page_targets = {}
+        self.bound_pages = set()
+        self.runtime_debug_sessions = {}
         self.session = None
         self.target_id = None
         self.dedicated_target_id = None
@@ -539,7 +551,7 @@ class Daemon:
             pass
 
     async def _enable_default_domains(self, session_id):
-        """Enable Page/DOM/Runtime/Network on a CDP session.
+        """Enable the raw domains needed by legacy helpers, but not Runtime.
 
         Used by both initial attach and set_session (called after switch_tab/
         new_tab). Without this, helpers that depend on Network.* events —
@@ -547,7 +559,7 @@ class Daemon:
         after a tab switch, because each fresh CDP session starts with all
         domains disabled.
 
-        Runs the four enables in parallel via gather so the worst-case time is
+        Runs the three enables in parallel via gather so the worst-case time is
         bounded by a single CDP round trip rather than four sequential ones —
         important on the set_session path, where the helper's IPC socket has
         a 5s read timeout.
@@ -560,7 +572,95 @@ class Daemon:
                 )
             except Exception as e:
                 log(f"enable {d} on {session_id}: {e}")
-        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))
+        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Network")))
+
+    def _emit_playwright_event(self, method, params, page=None):
+        target_id = next((tid for tid, candidate in self.page_targets.items() if candidate is page), None)
+        self.events.append({
+            "method": method,
+            "params": params,
+            "session_id": self.session if page is self.page else None,
+            "target_id": target_id,
+        })
+
+    def _bind_page_events(self, page):
+        if page in self.bound_pages:
+            return
+        self.bound_pages.add(page)
+        page.on("worker", lambda worker: self._emit_playwright_event(
+            "Playwright.worker", {"url": worker.url}, page
+        ))
+        page.on("frameattached", lambda frame: self._emit_playwright_event(
+            "Playwright.frameAttached", {"url": frame.url, "name": frame.name}, page
+        ))
+        page.on("framenavigated", lambda frame: self._emit_playwright_event(
+            "Playwright.frameNavigated", {"url": frame.url, "name": frame.name}, page
+        ))
+        page.on("framedetached", lambda frame: self._emit_playwright_event(
+            "Playwright.frameDetached", {"url": frame.url, "name": frame.name}, page
+        ))
+
+    async def _target_id_for_page(self, page):
+        session = await page.context.new_cdp_session(page)
+        try:
+            info = await session.send("Target.getTargetInfo")
+            return info["targetInfo"]["targetId"]
+        finally:
+            await session.detach()
+
+    async def _register_page(self, page):
+        self._bind_page_events(page)
+        try:
+            target_id = await self._target_id_for_page(page)
+            self.page_targets[target_id] = page
+            if os.environ.get("BH_RUNTIME_DEBUG") == "1" and page not in self.runtime_debug_sessions:
+                session = await page.context.new_cdp_session(page)
+                session.on("Runtime.consoleAPICalled", lambda params: self._emit_playwright_event(
+                    "Runtime.consoleAPICalled", params, page
+                ))
+                session.on("Runtime.exceptionThrown", lambda params: self._emit_playwright_event(
+                    "Runtime.exceptionThrown", params, page
+                ))
+                await session.send("Runtime.enable")
+                self.runtime_debug_sessions[page] = session
+                log(f"Runtime debug enabled for {target_id}")
+        except Exception as e:
+            log(f"map Playwright page target: {e}")
+
+    async def _refresh_pages(self):
+        if not self.browser:
+            return
+        live_pages = {page for context in self.browser.contexts for page in context.pages}
+        self.page_targets = {tid: page for tid, page in self.page_targets.items() if page in live_pages}
+        await asyncio.gather(*(self._register_page(page) for page in live_pages))
+
+    async def _select_page(self, target_id):
+        if not self.browser:
+            return None
+        await self._refresh_pages()
+        self.page = self.page_targets.get(target_id)
+        return self.page
+
+    async def _frame_for_target(self, target_id):
+        if not target_id:
+            return self.page
+        info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": target_id}))["targetInfo"]
+        url = info.get("url", "")
+        if self.page:
+            matches = [frame for frame in self.page.frames if frame.url == url]
+            if len(matches) == 1:
+                return matches[0]
+        raise RuntimeError(f"Playwright frame not found for target {target_id}")
+
+    async def _playwright_action(self, action, params):
+        if not self.page or self.page_targets.get(self.target_id) is not self.page:
+            await self._select_page(self.target_id)
+        if not self.page:
+            raise RuntimeError("Playwright is not attached to the active page")
+        if action == "evaluate":
+            frame = await self._frame_for_target(params.get("target_id"))
+            return await frame.evaluate(params["expression"])
+        raise RuntimeError(f"unknown Playwright action: {action}")
 
     def _record_session_replacement(self, stale_session, replacement_session):
         """Remember which recovered session still controls the same tab."""
@@ -656,11 +756,26 @@ class Daemon:
                 )
             raise RuntimeError(f"CDP WS handshake failed: {e} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.connect_over_cdp(url)
+        for context in self.browser.contexts:
+            context.on("page", lambda page: asyncio.create_task(self._register_page(page)))
+        await self._select_page(self.target_id)
         orig = self.cdp._event_registry.handle_event
         async def tap(method, params, session_id=None):
             self._record_event(method, params, session_id)
             return await orig(method, params, session_id)
         self.cdp._event_registry.handle_event = tap
+
+    async def close(self):
+        # Stop the Playwright driver/transport without closing the externally
+        # owned browser. Browser-pool or the local user owns browser lifetime.
+        for session in self.runtime_debug_sessions.values():
+            await _silent(session.detach())
+        self.runtime_debug_sessions.clear()
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
 
     async def handle(self, req):
         # Token guard for Windows TCP loopback: any local process can otherwise
@@ -679,6 +794,11 @@ class Daemon:
             out = list(self.events); self.events.clear()
             return {"events": out}
         if meta == "session":     return {"session_id": self.session}
+        if meta == "playwright":
+            try:
+                return {"result": await self._playwright_action(req["action"], req.get("params") or {})}
+            except Exception as e:
+                return {"error": str(e)}
         if meta == "current_tab":
             # Resolve the attached page's target info server-side. Helpers can't
             # send Target.getTargetInfo themselves: daemon strips session_id for
@@ -712,6 +832,7 @@ class Daemon:
                 self.session = req.get("session_id")
                 self.target_id = req.get("target_id") or self.target_id
                 new_session = self.session
+            await self._select_page(self.target_id)
             # Run the old-session Network.disable (defense in depth — keeps
             # background-tab traffic out of the global event buffer; the
             # consumer-side filter in wait_for_network_idle is the actual
@@ -865,8 +986,11 @@ async def serve(d):
 
 async def main():
     d = Daemon()
-    await d.start()
-    await serve(d)
+    try:
+        await d.start()
+        await serve(d)
+    finally:
+        await d.close()
 
 
 def already_running():
