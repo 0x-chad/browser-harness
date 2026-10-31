@@ -43,6 +43,7 @@ DEFAULT_IPC_RESPONSE_TIMEOUT_SECONDS = 5.0
 # Cloud screenshots routinely take longer than ordinary CDP round trips. Keep
 # their IPC socket alive within the caller's existing 90-second process budget.
 SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS = 60.0
+HUMAN_INPUT_IPC_RESPONSE_TIMEOUT_SECONDS = 120.0
 
 
 class _IPCResponseTimeout(TimeoutError):
@@ -149,7 +150,11 @@ def click_at_xy(x, y, button="left", clicks=1):
 
 def type_text(text):
     if _humanize_enabled():
-        return _playwright("human_type", text=text)
+        return _playwright(
+            "human_type",
+            text=text,
+            _response_timeout=HUMAN_INPUT_IPC_RESPONSE_TIMEOUT_SECONDS,
+        )
     cdp("Input.insertText", text=text)
 
 _SELECT_ALL_MODIFIER = None
@@ -178,6 +183,7 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
             text=text,
             clear_first=clear_first,
             timeout=timeout,
+            _response_timeout=HUMAN_INPUT_IPC_RESPONSE_TIMEOUT_SECONDS,
         )
     if timeout > 0:
         if not wait_for_element(selector, timeout=timeout):
