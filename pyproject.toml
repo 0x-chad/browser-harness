@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "cdp-use==1.4.5",
+    "clearcote==0.67.1",
     "fetch-use==0.4.0",
     "pillow==12.3.0",
     "rebrowser-playwright==1.64.101",

@@ -197,6 +197,11 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
   Pass CDP parameters as keywords: `cdp("Input.insertText", text="hello")`.
   The second positional argument is a session ID, not a parameters dictionary.
   When targeting an explicit session, use `session_id="..."` alongside the keywords.
+- Browser-pool exports `BH_HUMANIZE=1`. In that mode `click_at_xy()`,
+  `type_text()`, `fill_input()`, `press_key()`, and `scroll()` use Clearcote's
+  humanized Playwright input layer; coordinate clicks use Clearcote's native
+  browser-engine path when the connected build supports it. Direct Browser
+  Harness sessions keep the existing raw-CDP input unless explicitly enabled.
 - Do not call `Runtime.enable` in normal mode. `js(...)` uses Rebrowser's
   execution-context path; raw input, navigation, screenshots and the `cdp()`
   escape hatch retain Browser Harness's direct-CDP behavior.

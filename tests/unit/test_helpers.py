@@ -108,6 +108,37 @@ def test_page_info_raises_clear_error_on_js_exception():
             helpers.page_info()
 
 
+def test_humanized_input_routes_through_playwright(monkeypatch):
+    monkeypatch.setenv("BH_HUMANIZE", "1")
+    calls = []
+
+    def fake_playwright(action, **kwargs):
+        calls.append((action, kwargs))
+
+    with patch("browser_harness.helpers._playwright", side_effect=fake_playwright), \
+         patch("browser_harness.helpers.cdp") as raw_cdp:
+        helpers.click_at_xy(10, 20)
+        helpers.type_text("hello")
+        helpers.press_key("a", modifiers=4)
+        helpers.fill_input("#email", "a@example.com")
+        helpers.scroll(30, 40, dy=120)
+
+    assert [action for action, _ in calls] == [
+        "human_click", "human_type", "human_press", "human_fill", "human_scroll"
+    ]
+    assert calls[2][1]["key"] == "Meta+a"
+    raw_cdp.assert_not_called()
+
+
+def test_humanized_input_is_opt_in(monkeypatch):
+    monkeypatch.delenv("BH_HUMANIZE", raising=False)
+    with patch("browser_harness.helpers._playwright") as playwright, \
+         patch("browser_harness.helpers.cdp") as raw_cdp:
+        helpers.click_at_xy(10, 20)
+    playwright.assert_not_called()
+    assert raw_cdp.call_count == 2
+
+
 # --- fill_input ---
 
 def test_fill_input_focuses_types_and_fires_events():

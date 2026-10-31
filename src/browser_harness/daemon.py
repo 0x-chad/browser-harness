@@ -8,12 +8,17 @@ from . import _ipc as ipc
 from . import auth
 from . import paths
 from cdp_use.client import CDPClient
+from clearcote.async_api import install_humanize_on_context
 from rebrowser_playwright.async_api import async_playwright
 
 
 # Rebrowser discovers execution contexts without Runtime.enable. Clearcote
 # handles the browser fingerprint; Rebrowser owns page/frame evaluation.
 os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
+
+
+def humanize_enabled():
+    return os.environ.get("BH_HUMANIZE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _load_env():
@@ -660,6 +665,30 @@ class Daemon:
         if action == "evaluate":
             frame = await self._frame_for_target(params.get("target_id"))
             return await frame.evaluate(params["expression"])
+        if not humanize_enabled():
+            raise RuntimeError("humanized input is not enabled; set BH_HUMANIZE=1")
+        if action == "human_click":
+            return await self.page.mouse.click(
+                float(params["x"]),
+                float(params["y"]),
+                button=params.get("button", "left"),
+                click_count=int(params.get("clicks", 1)),
+            )
+        if action == "human_type":
+            return await self.page.keyboard.type(str(params["text"]))
+        if action == "human_press":
+            return await self.page.keyboard.press(str(params["key"]))
+        if action == "human_fill":
+            selector = str(params["selector"])
+            text = str(params["text"])
+            timeout = float(params.get("timeout", 0.0) or 0.0)
+            kwargs = {"timeout": timeout * 1000.0} if timeout > 0 else {}
+            if params.get("clear_first", True):
+                return await self.page.fill(selector, text, **kwargs)
+            return await self.page.type(selector, text, **kwargs)
+        if action == "human_scroll":
+            await self.page.mouse.move(float(params["x"]), float(params["y"]))
+            return await self.page.mouse.wheel(float(params.get("dx", 0)), float(params.get("dy", 0)))
         raise RuntimeError(f"unknown Playwright action: {action}")
 
     def _record_session_replacement(self, stale_session, replacement_session):
@@ -758,6 +787,17 @@ class Daemon:
         await self.attach_first_page()
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.connect_over_cdp(url)
+        if humanize_enabled():
+            seed = os.environ.get("BH_HUMANIZE_SEED") or NAME
+            for context in self.browser.contexts:
+                await install_humanize_on_context(
+                    context,
+                    humanize=True,
+                    show_cursor=False,
+                    browser=self.browser,
+                    seed=seed,
+                )
+            log("Clearcote humanized input enabled")
         for context in self.browser.contexts:
             context.on("page", lambda page: asyncio.create_task(self._register_page(page)))
         await self._select_page(self.target_id)

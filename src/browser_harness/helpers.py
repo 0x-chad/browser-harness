@@ -85,6 +85,10 @@ def _playwright(action, _response_timeout=30.0, **params):
     ).get("result")
 
 
+def _humanize_enabled():
+    return os.environ.get("BH_HUMANIZE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def drain_events():  return _send({"meta": "drain_events"})["events"]
 
 
@@ -138,10 +142,14 @@ def click_at_xy(x, y, button="left", clicks=1):
         except Exception as e:
             print(f"[debug_click] overlay failed: {e}")
         _debug_click_counter += 1
+    if _humanize_enabled():
+        return _playwright("human_click", x=x, y=y, button=button, clicks=clicks)
     cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, clickCount=clicks)
     cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, clickCount=clicks)
 
 def type_text(text):
+    if _humanize_enabled():
+        return _playwright("human_type", text=text)
     cdp("Input.insertText", text=text)
 
 _SELECT_ALL_MODIFIER = None
@@ -163,6 +171,14 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
     Raises RuntimeError if the element is not found. Pass timeout>0 to wait for
     late-rendered elements (e.g. after a route change) before typing.
     """
+    if _humanize_enabled():
+        return _playwright(
+            "human_fill",
+            selector=selector,
+            text=text,
+            clear_first=clear_first,
+            timeout=timeout,
+        )
     if timeout > 0:
         if not wait_for_element(selector, timeout=timeout):
             raise RuntimeError(f"fill_input: element not found: {selector!r}")
@@ -250,6 +266,10 @@ def press_key(key, modifiers=0):
     unless the caller is already composing a shortcut with Alt/Ctrl/Meta — there,
     the caller's intent wins over the physical truth.
     """
+    if _humanize_enabled():
+        names = [(1, "Alt"), (2, "Control"), (4, "Meta"), (8, "Shift")]
+        chord = "+".join([name for bit, name in names if modifiers & bit] + [key])
+        return _playwright("human_press", key=chord)
     if key in _KEYS:
         vk, code, text = _KEYS[key]
     elif len(key) == 1:
@@ -272,6 +292,8 @@ def press_key(key, modifiers=0):
     cdp("Input.dispatchKeyEvent", type="keyUp", **base)
 
 def scroll(x, y, dy=-300, dx=0):
+    if _humanize_enabled():
+        return _playwright("human_scroll", x=x, y=y, dx=dx, dy=dy)
     cdp("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=dx, deltaY=dy)
 
 
