@@ -484,6 +484,22 @@ def test_default_daemon_still_attaches_first_page(monkeypatch):
     assert d.cdp.created == 0
 
 
+def test_named_browser_pool_daemon_reuses_isolated_browser_window(monkeypatch):
+    """A browser-pool session already owns its browser process and real window."""
+    monkeypatch.setattr(daemon, "NAME", "pool-session")
+    monkeypatch.setattr(daemon, "REMOTE_ID", None)
+    monkeypatch.setenv("BROWSER_POOL_SESSION", "pool-session")
+    existing = [{"targetId": "pool-window", "url": "about:blank", "type": "page"}]
+    d = daemon.Daemon()
+    d.cdp = _AttachCDP(existing)
+
+    page = asyncio.run(d.attach_first_page())
+
+    assert page["targetId"] == "pool-window"
+    assert d.dedicated_target_id is None
+    assert d.cdp.created == 0
+
+
 def test_default_daemon_creates_missing_page_in_background(monkeypatch):
     """Fallback tabs must not steal the user's foreground Chrome tab."""
     monkeypatch.setattr(daemon, "NAME", "default")

@@ -464,7 +464,7 @@ class Daemon:
         # over a single tab (navigations clobber each other). Give each named
         # daemon its own dedicated tab instead. REMOTE_ID (cloud) browsers are
         # already exclusive to this daemon, so first-page attach stays.
-        if NAME != "default" and not REMOTE_ID:
+        if NAME != "default" and not REMOTE_ID and not os.environ.get("BROWSER_POOL_SESSION"):
             # The permission recovery flow can leave chrome://inspect open.
             # Clean it up before returning from this early path as well.
             if BROWSER_KIND == "local":
