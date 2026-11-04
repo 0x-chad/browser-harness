@@ -93,6 +93,56 @@ def _fresh_daemon():
     return d
 
 
+def test_select_page_primes_blank_rebrowser_context_once(monkeypatch):
+    class Page:
+        url = "about:blank"
+
+        def __init__(self):
+            self.expressions = []
+
+        async def evaluate(self, expression):
+            self.expressions.append(expression)
+            return 1
+
+    page = Page()
+    d = daemon.Daemon()
+    d.browser = object()
+    d.page_targets = {"blank-target": page}
+
+    async def no_refresh():
+        return None
+
+    monkeypatch.setattr(d, "_refresh_pages", no_refresh)
+
+    async def run():
+        assert await d._select_page("blank-target") is page
+        assert await d._select_page("blank-target") is page
+
+    asyncio.run(run())
+
+    assert page.expressions == ["1"]
+
+
+def test_select_page_does_not_prime_loaded_page(monkeypatch):
+    class Page:
+        url = "https://example.com/"
+
+        async def evaluate(self, _expression):
+            raise AssertionError("loaded pages must not be primed")
+
+    page = Page()
+    d = daemon.Daemon()
+    d.browser = object()
+    d.page_targets = {"loaded-target": page}
+
+    async def no_refresh():
+        return None
+
+    monkeypatch.setattr(d, "_refresh_pages", no_refresh)
+
+    assert asyncio.run(d._select_page("loaded-target")) is page
+
+
 @pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
 def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch, value):
     monkeypatch.setenv("BH_TAB_MARKER", value)

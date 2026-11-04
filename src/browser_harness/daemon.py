@@ -440,6 +440,7 @@ class Daemon:
         self.page = None
         self.page_targets = {}
         self.bound_pages = set()
+        self.primed_pages = set()
         self.runtime_debug_sessions = {}
         self.session = None
         self.target_id = None
@@ -637,6 +638,7 @@ class Daemon:
             return
         live_pages = {page for context in self.browser.contexts for page in context.pages}
         self.page_targets = {tid: page for tid, page in self.page_targets.items() if page in live_pages}
+        self.primed_pages.intersection_update(live_pages)
         await asyncio.gather(*(self._register_page(page) for page in live_pages))
 
     async def _select_page(self, target_id):
@@ -644,6 +646,24 @@ class Daemon:
             return None
         await self._refresh_pages()
         self.page = self.page_targets.get(target_id)
+        # Rebrowser needs one execution context before raw CDP navigates a fresh
+        # target. Without this, a fast first navigation can leave its Page
+        # permanently reporting "Target crashed" while the real target remains
+        # healthy and controllable over CDP. Prime only the harmless blank page.
+        if (
+            self.page
+            and self.page not in self.primed_pages
+            and (
+                self.page.url == "about:blank"
+                or self.page.url.startswith("about:blank#")
+            )
+        ):
+            try:
+                await asyncio.wait_for(self.page.evaluate("1"), timeout=3)
+                self.primed_pages.add(self.page)
+                log(f"primed Rebrowser context for blank target {target_id}")
+            except Exception as e:
+                log(f"prime Rebrowser context for {target_id}: {e}")
         return self.page
 
     async def _frame_for_target(self, target_id):

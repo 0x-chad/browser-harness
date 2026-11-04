@@ -40,6 +40,7 @@ SOCK = ipc.sock_addr(NAME)
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
 IPC_CONNECT_TIMEOUT_SECONDS = 5.0
 DEFAULT_IPC_RESPONSE_TIMEOUT_SECONDS = 5.0
+SET_SESSION_IPC_RESPONSE_TIMEOUT_SECONDS = 30.0
 # Cloud screenshots routinely take longer than ordinary CDP round trips. Keep
 # their IPC socket alive within the caller's existing 90-second process budget.
 SCREENSHOT_IPC_RESPONSE_TIMEOUT_SECONDS = 60.0
@@ -398,7 +399,10 @@ def switch_tab(target, activate=False):
     if activate:
         activate_tab(target_id)
     sid = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
-    _send({"meta": "set_session", "session_id": sid, "target_id": target_id})
+    _send(
+        {"meta": "set_session", "session_id": sid, "target_id": target_id},
+        response_timeout=SET_SESSION_IPC_RESPONSE_TIMEOUT_SECONDS,
+    )
     _mark_tab()
     return sid
 

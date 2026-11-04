@@ -467,11 +467,16 @@ def test_switch_tab_keeps_visible_tab_unchanged_by_default(monkeypatch):
         return {}
 
     monkeypatch.setattr(helpers, "cdp", fake_cdp)
-    monkeypatch.setattr(helpers, "_send", lambda request: calls.append(("ipc", request)) or {})
+    monkeypatch.setattr(helpers, "_send", lambda request, **kwargs: calls.append(("ipc", request, kwargs)) or {})
     monkeypatch.setattr(helpers, "_mark_tab", lambda: None)
 
     assert helpers.switch_tab({"target_id": "target-new"}) == "session-new"
-    assert not any(method == "Target.activateTarget" for method, _ in calls)
+    assert not any(call[0] == "Target.activateTarget" for call in calls)
+    assert ("ipc", {
+        "meta": "set_session",
+        "session_id": "session-new",
+        "target_id": "target-new",
+    }, {"response_timeout": helpers.SET_SESSION_IPC_RESPONSE_TIMEOUT_SECONDS}) in calls
 
 
 def test_switch_tab_can_explicitly_activate_visible_tab(monkeypatch):
@@ -484,7 +489,7 @@ def test_switch_tab_can_explicitly_activate_visible_tab(monkeypatch):
         return {}
 
     monkeypatch.setattr(helpers, "cdp", fake_cdp)
-    monkeypatch.setattr(helpers, "_send", lambda request: calls.append(("ipc", request)) or {})
+    monkeypatch.setattr(helpers, "_send", lambda request, **kwargs: calls.append(("ipc", request, kwargs)) or {})
     monkeypatch.setattr(helpers, "_mark_tab", lambda: None)
 
     assert helpers.switch_tab("target-new", activate=True) == "session-new"
@@ -503,12 +508,12 @@ def test_new_tab_creates_and_attaches_in_background(monkeypatch):
         return {}
 
     monkeypatch.setattr(helpers, "cdp", fake_cdp)
-    monkeypatch.setattr(helpers, "_send", lambda request: calls.append(("ipc", request)) or {})
+    monkeypatch.setattr(helpers, "_send", lambda request, **kwargs: calls.append(("ipc", request, kwargs)) or {})
     monkeypatch.setattr(helpers, "_mark_tab", lambda: None)
 
     assert helpers.new_tab() == "target-new"
     assert ("Target.createTarget", {"url": "about:blank", "background": True}) in calls
-    assert not any(method == "Target.activateTarget" for method, _ in calls)
+    assert not any(call[0] == "Target.activateTarget" for call in calls)
 
 
 def test_new_tab_reuses_an_empty_data_document(monkeypatch):
