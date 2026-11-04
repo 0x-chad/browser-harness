@@ -465,11 +465,23 @@ def iframe_target(url_substr):
 def wait(seconds=1.0):
     time.sleep(seconds)
 
+def _is_transient_navigation_error(exc):
+    message = str(exc).lower()
+    return any(fragment in message for fragment in (
+        "execution context was destroyed",
+        "cannot find context with specified id",
+        "navigation interrupted the evaluation",
+    ))
+
 def wait_for_load(timeout=15.0):
     """Poll document.readyState == 'complete' or timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if js("document.readyState") == "complete": return True
+        try:
+            if js("document.readyState") == "complete": return True
+        except RuntimeError as e:
+            if not _is_transient_navigation_error(e):
+                raise
         time.sleep(0.3)
     return False
 

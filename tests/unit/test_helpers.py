@@ -108,6 +108,36 @@ def test_page_info_raises_clear_error_on_js_exception():
             helpers.page_info()
 
 
+def test_wait_for_load_retries_transient_navigation_context_errors(monkeypatch):
+    results = iter([
+        RuntimeError("Page.evaluate: Execution context was destroyed, most likely because of a navigation"),
+        "loading",
+        "complete",
+    ])
+
+    def fake_js(_expression):
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(helpers, "js", fake_js)
+    monkeypatch.setattr(helpers.time, "sleep", lambda _seconds: None)
+
+    assert helpers.wait_for_load(timeout=1) is True
+
+
+def test_wait_for_load_does_not_hide_non_navigation_errors(monkeypatch):
+    monkeypatch.setattr(
+        helpers,
+        "js",
+        lambda _expression: (_ for _ in ()).throw(RuntimeError("Page.evaluate: Target crashed")),
+    )
+
+    with pytest.raises(RuntimeError, match="Target crashed"):
+        helpers.wait_for_load(timeout=1)
+
+
 def test_humanized_input_routes_through_playwright(monkeypatch):
     monkeypatch.setenv("BH_HUMANIZE", "1")
     calls = []
