@@ -6,6 +6,23 @@ import pytest
 from browser_harness import daemon
 
 
+@pytest.mark.parametrize("preset", ["careful", "default", "quick"])
+def test_humanize_options_accepts_clearcote_presets(monkeypatch, preset):
+    monkeypatch.setenv("BH_HUMANIZE_PRESET", preset)
+    assert daemon.humanize_options().preset == preset
+
+
+def test_humanize_options_defaults_to_default(monkeypatch):
+    monkeypatch.delenv("BH_HUMANIZE_PRESET", raising=False)
+    assert daemon.humanize_options().preset == "default"
+
+
+def test_humanize_options_rejects_unknown_preset(monkeypatch):
+    monkeypatch.setenv("BH_HUMANIZE_PRESET", "turbo")
+    with pytest.raises(RuntimeError, match="invalid BH_HUMANIZE_PRESET: 'turbo'"):
+        daemon.humanize_options()
+
+
 def test_publish_own_pid_never_truncates_parent_record(tmp_path, monkeypatch):
     pid_file = tmp_path / "daemon.pid"
     pid_file.write_text('{"pid":4321,"started":"process start with spaces"}')

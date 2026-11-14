@@ -8,7 +8,7 @@ from . import _ipc as ipc
 from . import auth
 from . import paths
 from cdp_use.client import CDPClient
-from clearcote.async_api import install_humanize_on_context
+from clearcote.async_api import HumanizeOptions, install_humanize_on_context
 from rebrowser_playwright.async_api import async_playwright
 
 
@@ -19,6 +19,14 @@ os.environ.setdefault("REBROWSER_PATCHES_RUNTIME_FIX_MODE", "addBinding")
 
 def humanize_enabled():
     return os.environ.get("BH_HUMANIZE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def humanize_options():
+    preset = os.environ.get("BH_HUMANIZE_PRESET", "default").strip().lower() or "default"
+    try:
+        return HumanizeOptions(preset=preset)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid BH_HUMANIZE_PRESET: {preset!r}") from exc
 
 
 def _load_env():
@@ -809,15 +817,16 @@ class Daemon:
         self.browser = await self.playwright.chromium.connect_over_cdp(url)
         if humanize_enabled():
             seed = os.environ.get("BH_HUMANIZE_SEED") or NAME
+            options = humanize_options()
             for context in self.browser.contexts:
                 await install_humanize_on_context(
                     context,
-                    humanize=True,
+                    humanize=options,
                     show_cursor=False,
                     browser=self.browser,
                     seed=seed,
                 )
-            log("Clearcote humanized input enabled")
+            log(f"Clearcote humanized input enabled ({options.preset} preset)")
         for context in self.browser.contexts:
             context.on("page", lambda page: asyncio.create_task(self._register_page(page)))
         await self._select_page(self.target_id)
