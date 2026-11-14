@@ -1,6 +1,6 @@
 # Dialogs
 
-Browser dialogs (`alert`, `confirm`, `prompt`, `beforeunload`) freeze the JS thread. Two approaches depending on timing.
+Browser dialogs (`alert`, `confirm`, `prompt`, `beforeunload`) freeze the JS thread.
 
 ## Detection
 
@@ -25,40 +25,14 @@ for e in events:
 
 Undetectable by antibot — no JS injected into the page.
 
-## Proactive: stub via JS
-
-Prevents dialogs from ever appearing. Good when you expect multiple `alert()`/`confirm()` calls in sequence.
-
-```python
-js("""
-window.__dialogs__=[];
-window.alert=m=>window.__dialogs__.push(String(m));
-window.confirm=m=>{window.__dialogs__.push(String(m));return true;};
-window.prompt=(m,d)=>{window.__dialogs__.push(String(m));return d||'';};
-""")
-# ... do actions that trigger dialogs ...
-msgs = js("window.__dialogs__||[]")
-```
-
-Tradeoffs:
-- Stubs are lost on page navigation -- must re-run the snippet
-- `confirm()` always returns `true` (auto-approves)
-- Detectable by antibot (`window.alert.toString()` reveals non-native code)
-- Does NOT handle `beforeunload`
-
 ## beforeunload specifically
 
 Fires when navigating away from a page with unsaved changes (forms, editors, upload pages). The page freezes until the user clicks Leave/Stay.
 
 ```python
-# Option A: dismiss after navigating (CDP-level, safe)
 goto_url("https://new-url.com")
 try:
     cdp("Page.handleJavaScriptDialog", accept=True)  # click "Leave"
 except:
     pass  # no dialog — normal
-
-# Option B: prevent before navigating (JS injection, detectable)
-js("window.onbeforeunload=null")
-goto_url("https://new-url.com")
 ```

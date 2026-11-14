@@ -48,15 +48,4 @@ print(page_info())
 PY
 ```
 
-This changes the desktop window size only. It does not emulate a mobile user agent, touch support, or device scale factor. For true mobile emulation, deliberately use `Emulation.setDeviceMetricsOverride` and a user-agent override, then verify with `page_info()` and a screenshot.
-
-## Touch emulation
-
-`maxTouchPoints` is optional, but Chrome validates it as 1–16 even when touch emulation is being disabled. Omit it when disabling:
-
-```python
-cdp("Emulation.setTouchEmulationEnabled", enabled=True, maxTouchPoints=5)
-cdp("Emulation.setTouchEmulationEnabled", enabled=False)
-```
-
-Do not pass `maxTouchPoints=0`; Chrome rejects the supplied value before acting on `enabled=False`.
+This changes the desktop window size only. It does not emulate a mobile user agent, touch support, or device scale factor.

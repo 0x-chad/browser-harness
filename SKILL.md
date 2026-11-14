@@ -96,8 +96,8 @@ For popup visibility and user handoff, follow the general tab rules above: switc
   [references/dialogs.md](references/dialogs.md).
 - Before deriving coordinates from screenshots or capturing large pages, read
   [references/screenshots.md](references/screenshots.md).
-- Before changing window bounds, using mobile-sized layouts, or enabling touch
-  emulation, read [references/viewport.md](references/viewport.md).
+- Before changing window bounds or using mobile-sized layouts, read
+  [references/viewport.md](references/viewport.md).
 
 ## Design Constraints
 
