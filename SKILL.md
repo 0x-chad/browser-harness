@@ -55,12 +55,32 @@ PY
 Use Browser Harness helpers for interaction. In Browser Pool sessions these
 helpers use the configured Clearcote humanization path.
 
-- `click_at_xy(x, y)` — click viewport coordinates.
-- `fill_input(selector, text, clear_first=True, timeout=0)` — default for form
-  fields.
-- `type_text(text)` — type into an already-focused editable element.
-- `press_key(key, modifiers=0)` — named keys, individual keys, or shortcuts.
-- `scroll(x, y, dy=-300, dx=0)` — scroll at viewport coordinates.
+- `click_at_xy(x, y, button="left", clicks=1)` — click CSS-pixel viewport
+  coordinates; reacquire them after scrolling or rerendering.
+- `fill_input(selector, text, clear_first=True, timeout=0)` — default for a
+  CSS-selector-addressable form field. `clear_first=False` preserves its
+  existing value; pass a positive timeout in seconds for a late-rendered field.
+- `type_text(text)` — type into an already-focused editable element; it does
+  not focus or clear the field.
+- `press_key(key, modifiers=0)` — press a named or printable key. Modifier bits
+  combine as Alt `1`, Ctrl `2`, Meta/Cmd `4`, and Shift `8`.
+- `scroll(x, y, dy=-300, dx=0)` — wheel at a CSS-pixel viewport point over the
+  intended scroll container; positive `dy` scrolls down and negative scrolls up.
+
+Clearcote dispatches these actions as trusted, human-paced input. Typing may
+include a corrected slip. `fill_input()` follows the field type, including
+masked, range, and date-like controls, and bulk-inserts values over roughly 200
+characters instead of typing them individually. Scrolling uses platform-sized
+wheel notches. After an input timeout, inspect the current value before retrying
+because part of the action may have landed.
+
+For a frame-owned field that `fill_input()` cannot address, use compositor
+coordinates to focus it and then call `type_text()`. Browser Harness has no core
+humanized helper for hover, drag, select-option, check/uncheck, or press-and-hold;
+compose coordinate and keyboard input when practical, then use a targeted CDP or
+JavaScript fallback when needed. `dispatch_key()` creates a synthetic JavaScript
+event and is not a substitute for `press_key()`. `upload_file()` assigns a file
+directly and is not humanized.
 
 Verify the observable result after every interaction; a helper returning
 successfully does not prove the page acted. If nothing changes, follow the
@@ -75,7 +95,6 @@ result and do not blindly repeat it.
 - After navigation, call `wait_for_load()`.
 - If the current tab is stale or internal, call `ensure_real_tab()`.
 - Use `js(...)` for DOM inspection or extraction when coordinates are the wrong tool.
-- When entering unusually long text, avoid slow per-character typing: find a faster page-appropriate input method, then verify the page kept the exact value.
 - Before submitting a form, verify every entered value and selection against the intended inputs.
 - Prefer waits tied to observable state such as an expected URL, text, element, or load state. Use fixed-duration waits only for animations or when no observable condition exists.
 - After a rerender, timeout, covered element, popup, or iframe change, re-inspect the current AX/DOM, tab, and frame state before acting again. Resolve visible blockers instead of forcing a click, and do not blindly retry stale targets.
