@@ -5,7 +5,7 @@ description: "Control a real browser through CDP with Rebrowser-patched JavaScri
 
 # browser-harness
 
-Direct browser control via CDP, with Rebrowser Playwright owning execution-context discovery and `js(...)` evaluation so normal mode never enables the Runtime domain. For task-specific edits, use `agent-workspace/agent_helpers.py`. For setup, install, or connection problems, read https://github.com/browser-use/browser-harness/blob/main/install.md.
+Direct browser control via CDP, with Rebrowser Playwright owning execution-context discovery and `js(...)` evaluation so normal mode never enables the Runtime domain. For task-specific edits, use `agent-workspace/agent_helpers.py`.
 
 ## When Not to Use
 
@@ -90,26 +90,14 @@ Use this process progressively, expanding inspection only when simpler semantic 
 
 For popup visibility and user handoff, follow the general tab rules above: switch to the intended target and call `activate_tab()` only when the user explicitly asks to see it. Keep the pooled session alive until the handoff is finished.
 
-## Interaction Skills
+## References
 
-If you get stuck on a browser mechanic, check https://github.com/browser-use/browser-harness/tree/main/interaction-skills.
-
-- connection.md
-- cookies.md
-- cross-origin-iframes.md
-- dialogs.md
-- downloads.md
-- drag-and-drop.md
-- dropdowns.md
-- iframes.md
-- network-requests.md
-- print-as-pdf.md
-- screenshots.md
-- scrolling.md
-- shadow-dom.md
-- tabs.md
-- uploads.md
-- viewport.md
+- For JavaScript dialogs and `beforeunload`, read
+  [references/dialogs.md](references/dialogs.md).
+- Before deriving coordinates from screenshots or capturing large pages, read
+  [references/screenshots.md](references/screenshots.md).
+- Before changing window bounds, using mobile-sized layouts, or enabling touch
+  emulation, read [references/viewport.md](references/viewport.md).
 
 ## Design Constraints
 
