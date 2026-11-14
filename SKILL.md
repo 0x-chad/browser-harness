@@ -193,7 +193,6 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
 - Prefer waits tied to observable state such as an expected URL, text, element, or load state. Use fixed-duration waits only for animations or when no observable condition exists.
 - After a rerender, timeout, covered element, popup, or iframe change, re-inspect the current AX/DOM, tab, and frame state before acting again. Resolve visible blockers instead of forcing a click, and do not blindly retry stale targets.
 - Browser-native passkey/WebAuthn choosers are outside the page DOM and are not JavaScript dialogs. Clearcote may leave one pending like a real unanswered prompt; CDP `Escape` may not dismiss it, and it can intercept coordinate input while the page remains scriptable. Count an authentication alert only when it is rendered (`checkVisibility()` and a nonzero layout box) or corroborated by the response/page state. If the site visibly offers password fallback, the verified password remains populated, and one coordinate submit produces no login request, navigation, or visible error, invoke that same validated submit control once with DOM `click()` or `form.requestSubmit(control)`, then inspect the response. Never loop credential submissions.
-- Login walls: stop and ask. Exception: use available SSO automatically when Chrome is already signed in; still stop for passwords, MFA, consent, or ambiguous account choice.
 - Raw CDP is available with `cdp("Domain.method", ...)`.
   Pass CDP parameters as keywords: `cdp("Input.insertText", text="hello")`.
   The second positional argument is a session ID, not a parameters dictionary.
@@ -210,6 +209,30 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
   `BH_RUNTIME_DEBUG=1`; native `Runtime.consoleAPICalled` and
   `Runtime.exceptionThrown` entries then appear in `drain_events()`. Restart
   without that variable to return to normal mode.
+
+### Iframes and embedded surfaces
+
+Rendered pages can combine several embedding models that look identical on screen but require different control paths:
+
+- **Same-origin iframe:** inspect and interact through `contentDocument` / `contentWindow`.
+- **Cross-origin iframe:** the parent can expose the iframe element and box but not its inner DOM.
+- **Out-of-process iframe (OOPIF):** Chrome may expose the frame as a separate CDP target; use `iframe_target()` and `js(..., target_id=...)` when the target is available.
+- **Nested iframe tree:** the visible control may be multiple frames below the outer iframe. Recursively inspect frames and verify which frame owns the rendered control.
+- **Isolated component frames:** one visible widget may split fields or controls across separate nested frames. An outer frame reporting zero inputs does not prove the visible controls are unavailable.
+- **Popup-producing frame:** an action inside a frame may open a new page target while leaving the original page unchanged.
+- **Canvas or compositor-only surface:** a visible control may be absent from DOM and AX trees entirely.
+
+Use this process progressively, expanding inspection only when simpler semantic targeting fails or evidence conflicts:
+
+1. **Start with semantic targeting.** Prefer AX and DOM because they provide stable identities. For same-origin frames use `contentDocument`; for an attached OOPIF use `iframe_target()` with `js(..., target_id=...)`. Recursively inspect nested frames and confirm that the target contains the rendered control.
+2. **Use the rendered UI to resolve disagreement.** If AX, DOM, and frame inspection do not explain what is visibly rendered, capture a screenshot and treat the visible UI as authoritative for whether a control exists and where its outer boundary lies.
+3. **Locate the outer boundary.** Read the visible iframe, overlay, or composited region's current `getBoundingClientRect()` or `DOM.getBoxModel`.
+4. **Fall back to compositor input.** Use `click_at_xy()` inside the current boundary when semantic access is unavailable. Use keyboard traversal such as `Tab`, arrow keys, and Enter when it is more stable than guessing multiple coordinates. Compositor input crosses iframe, shadow, and process boundaries.
+5. **Reacquire after every transition.** After navigation, scrolling, rerendering, modal changes, dropdowns, frame swaps, failed actions, or method changes, rediscover the active tab, frame tree, target IDs, element boxes, and coordinates. Never reuse stale frame targets or geometry.
+6. **Inspect every outcome channel.** Recheck the current tab, call `list_tabs()` for popups, inspect dialogs and overlays, compare frame inventories, read visible validation state, and inspect relevant network responses. An unchanged parent page does not mean the action did nothing.
+7. **Verify the final effect.** Do not infer completion from a click, spinner, popup closure, DOM mutation, or successful intermediate request. Confirm the requested final visible and backend state.
+
+For popup visibility and user handoff, follow the general tab rules above: switch to the intended target and call `activate_tab()` only when the user explicitly asks to see it. Keep the pooled session alive until the handoff is finished.
 
 ## Recordings and Videos
 
