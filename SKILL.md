@@ -62,10 +62,12 @@ helpers use the configured Clearcote humanization path.
 - `press_key(key, modifiers=0)` — named keys, individual keys, or shortcuts.
 - `scroll(x, y, dy=-300, dx=0)` — scroll at viewport coordinates.
 
-Verify the resulting state after each interaction. Do not substitute raw
-`cdp("Input...")`, DOM `.click()`, or JavaScript value assignment unless these
-helpers cannot perform the action; those paths bypass Browser Harness input
-routing and may bypass humanization.
+Verify the observable result after every interaction; a helper returning
+successfully does not prove the page acted. If nothing changes, follow the
+re-inspection guidance below and use targeted raw CDP or JavaScript to
+distinguish helper-routing failure from page state or site behavior. Raw CDP is
+a valid diagnostic and fallback path, but may bypass humanization; verify its
+result and do not blindly repeat it.
 
 - Prefer to find elements with the accessibility tree, not screenshots: `cdp("Accessibility.getFullAXTree")["nodes"]` has every element's role, name, and `backendDOMNodeId` — filter in Python before printing (it is thousands of nodes). Coordinates: `q = cdp("DOM.getBoxModel", backendNodeId=n)["model"]["content"]; x, y = sum(q[0::2])/4, sum(q[1::2])/4` (viewport px, ready for `click_at_xy`; negative/oversized means scroll first).
 - Clicking: AX node -> box center -> `click_at_xy(x, y)` -> verify with a targeted `js(...)`/`page_info()` check.
