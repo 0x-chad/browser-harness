@@ -21,6 +21,8 @@ PY
 
 - Invoke as `browser-harness`. Use heredocs for multi-line commands.
 - Helpers are pre-imported. `run.py` calls `ensure_daemon()` before `exec`.
+- If daemon health or attachment is uncertain, run `browser-harness --doctor`
+  before replacing it.
 - First navigation for a task is `new_tab(url)`, not `goto_url(url)`. The daemon
   preserves the attached tab across separate CLI invocations, so do not call
   `new_tab()` again in every script.
@@ -48,6 +50,23 @@ PY
 
 ## Page Workflow
 
+### Humanized input helpers
+
+Use Browser Harness helpers for interaction. In Browser Pool sessions these
+helpers use the configured Clearcote humanization path.
+
+- `click_at_xy(x, y)` — click viewport coordinates.
+- `fill_input(selector, text, clear_first=True, timeout=0)` — default for form
+  fields.
+- `type_text(text)` — type into an already-focused editable element.
+- `press_key(key, modifiers=0)` — named keys, individual keys, or shortcuts.
+- `scroll(x, y, dy=-300, dx=0)` — scroll at viewport coordinates.
+
+Verify the resulting state after each interaction. Do not substitute raw
+`cdp("Input...")`, DOM `.click()`, or JavaScript value assignment unless these
+helpers cannot perform the action; those paths bypass Browser Harness input
+routing and may bypass humanization.
+
 - Prefer to find elements with the accessibility tree, not screenshots: `cdp("Accessibility.getFullAXTree")["nodes"]` has every element's role, name, and `backendDOMNodeId` — filter in Python before printing (it is thousands of nodes). Coordinates: `q = cdp("DOM.getBoxModel", backendNodeId=n)["model"]["content"]; x, y = sum(q[0::2])/4, sum(q[1::2])/4` (viewport px, ready for `click_at_xy`; negative/oversized means scroll first).
 - Clicking: AX node -> box center -> `click_at_xy(x, y)` -> verify with a targeted `js(...)`/`page_info()` check.
 - Fall back to raw HTML via `js(...)` only when the AX tree lacks the element (canvas, exotic widgets); screenshot when layout or imagery matters.
@@ -60,7 +79,8 @@ PY
 - After a rerender, timeout, covered element, popup, or iframe change, re-inspect the current AX/DOM, tab, and frame state before acting again. Resolve visible blockers instead of forcing a click, and do not blindly retry stale targets.
 - Browser-native passkey/WebAuthn choosers are outside the page DOM and are not JavaScript dialogs. Clearcote may leave one pending like a real unanswered prompt; CDP `Escape` may not dismiss it, and it can intercept coordinate input while the page remains scriptable. Count an authentication alert only when it is rendered (`checkVisibility()` and a nonzero layout box) or corroborated by the response/page state. If the site visibly offers password fallback, the verified password remains populated, and one coordinate submit produces no login request, navigation, or visible error, invoke that same validated submit control once with DOM `click()` or `form.requestSubmit(control)`, then inspect the response. Never loop credential submissions.
 - Raw CDP is available with `cdp("Domain.method", ...)`.
-  Pass CDP parameters as keywords: `cdp("Input.insertText", text="hello")`.
+  For example: `cdp("Browser.getVersion")`.
+  Pass CDP parameters as keywords.
   The second positional argument is a session ID, not a parameters dictionary.
   When targeting an explicit session, use `session_id="..."` alongside the keywords.
 - Do not call `Runtime.enable` in normal mode. `js(...)` uses Rebrowser's
