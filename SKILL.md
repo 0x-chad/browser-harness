@@ -34,8 +34,7 @@ PY
   Keep a tab open if the user needs to see it, it is needed for a known follow-up,
   or closing it could discard unsaved work or other important state.
 - Exhaust every avenue to continue without the user; only when user action is
-  unavoidable, leave the task tab and Browser Pool session open for handoff
-  rather than closing or stopping them.
+  unavoidable, leave the task tab open for handoff.
 - `new_tab()` and `switch_tab()` attach and move the horse marker without
   changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background. Never call `activate_tab(target)` automatically: it brings Chrome
